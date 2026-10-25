@@ -24,12 +24,21 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Rounds fetched on earlier runs (.cache/rounds.json). Each run restores
+      # the newest copy and saves an updated one under a new key.
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: racecal-store-${{ github.run_id }}
+          restore-keys: racecal-store-
 
       - name: Build calendar
         run: python racecal.py --verbose

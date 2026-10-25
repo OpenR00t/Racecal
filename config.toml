@@ -32,6 +32,8 @@ seasons = [0, 1]
 # Output file
 output = "public/racecal.ics"
 calendar_name = "Racecal"
+# Stop calling the API after this many minutes and build from stored rounds.
+time_budget_minutes = 20
 
 [[series]]
 name = "F1"

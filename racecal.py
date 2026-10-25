@@ -23,8 +23,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 API = "https://www.thesportsdb.com/api/v1/json/123"
-REQUEST_GAP = 2.2  # seconds between API calls (free tier rate limit)
-MAX_EMPTY_ROUNDS = 3  # stop scanning a season after this many empty rounds
+REQUEST_GAP = 2.5  # seconds between API calls (free tier rate limit)
+RETRY_BACKOFF = (20, 40, 60, 0)  # wait after each failed attempt (4 attempts)
+MAX_FAILURES = 4  # consecutive given-up requests before going store-only
+MAX_EMPTY_ROUNDS = 2  # stop scanning a season after this many empty rounds
 MAX_ROUND = 40
 
 SESSION_WORDS = re.compile(
@@ -73,62 +75,182 @@ class Event:
 # --------------------------------------------------------------------------
 
 
+class FetchError(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
 class Api:
-    def __init__(self, cache_dir: Path | None):
-        self.cache_dir = cache_dir
+    """Rate-limited client for TheSportsDB's free API."""
+
+    def __init__(self, budget_minutes: float = 20):
         self._last = 0.0
+        self._failures = 0  # consecutive requests that gave up
+        self._deadline = time.monotonic() + budget_minutes * 60
+        self.blocked = False
+        self.requests = 0
 
     def get(self, endpoint: str) -> dict:
-        cache = None
-        if self.cache_dir:
-            cache = self.cache_dir / (re.sub(r"[^\w.-]", "_", endpoint) + ".json")
-            if cache.exists():
-                return json.loads(cache.read_text())
-
-        for attempt in range(5):
+        if not self.blocked and time.monotonic() > self._deadline:
+            log("  time budget used up; using stored data from here on")
+            self.blocked = True
+        if self.blocked:
+            raise FetchError("API unavailable for the rest of this run")
+        for attempt, backoff in enumerate(RETRY_BACKOFF):
             wait = REQUEST_GAP - (time.monotonic() - self._last)
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
+            self.requests += 1
             try:
                 req = urllib.request.Request(
                     f"{API}/{endpoint}", headers={"User-Agent": "racecal/1.0"}
                 )
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    body = resp.read().decode("utf-8")
-                data = json.loads(body)
-                break
-            except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-                # Rate limited or transient failure: back off and retry.
-                time.sleep(5 * (attempt + 1))
-        else:
-            raise RuntimeError(f"giving up on {endpoint}")
+                    data = json.loads(resp.read().decode("utf-8"))
+                self._failures = 0
+                return data
+            except urllib.error.HTTPError as err:
+                if err.code not in (429, 500, 502, 503, 504):
+                    raise FetchError(f"HTTP {err.code}") from err
+                retry_after = err.headers.get("Retry-After", "")
+                pause = int(retry_after) if retry_after.isdigit() else backoff
+                reason = f"HTTP {err.code}"
+            except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as err:
+                pause, reason = backoff, type(err).__name__
+            if attempt < len(RETRY_BACKOFF) - 1:
+                log(f"  {reason} on {endpoint}, waiting {pause}s")
+                time.sleep(pause)
+        self._failures += 1
+        if self._failures >= MAX_FAILURES:
+            log("  API keeps refusing requests; using stored data from here on")
+            self.blocked = True
+        raise FetchError(f"gave up on {endpoint} ({reason})")
 
-        if cache:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(data))
-        return data
 
-    def season_events(self, league: int, season: int) -> list[dict]:
-        """All events for a season, walked round by round.
+class RoundStore:
+    """Raw API responses per round, kept between runs.
 
-        The free API caps season listings at 15 events, but per-round
-        queries return the full round.
+    Rounds are only re-fetched when their stored copy is stale (see
+    `fresh`), and any round the API fails on falls back to its last good
+    copy. That keeps daily builds to a handful of requests and stops a rate
+    limit from emptying the calendar.
+    """
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        # endpoint -> {"fetched": ISO time, "events": [...]}; [] = empty round
+        self.rounds: dict[str, dict] = {}
+        if path and path.exists():
+            try:
+                self.rounds = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                log(f"warning: ignoring unreadable store {path}")
+
+    def save(self) -> None:
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.rounds), encoding="utf-8")
+
+    def put(self, key: str, events: list[dict]) -> None:
+        self.rounds[key] = {
+            "fetched": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "events": events,
+        }
+
+    def events(self, key: str) -> list[dict] | None:
+        entry = self.rounds.get(key)
+        return None if entry is None else entry["events"]
+
+    def last_round(self, league: int, season: int) -> int:
+        pattern = re.compile(rf"^eventsround\.php\?id={league}&r=(\d+)&s={season}$")
+        rounds = [
+            int(m.group(1))
+            for k, v in self.rounds.items()
+            if (m := pattern.match(k)) and v["events"]
+        ]
+        return max(rounds, default=-1)
+
+    def fresh(self, key: str) -> bool:
+        """True when the stored copy is good enough to skip the API.
+
+        - finished rounds (last day more than 2 days ago): always
+        - rounds within the next two weeks, or under way: 12 hours
+        - rounds further out, and empty rounds past a season's end: about a
+          week, spread over several days so they don't all expire together
         """
-        events: list[dict] = []
-        empty = 0
-        for rnd in range(0, MAX_ROUND + 1):
-            data = self.get(f"eventsround.php?id={league}&r={rnd}&s={season}")
-            found = data.get("events") or []
-            if found:
-                events.extend(found)
-                empty = 0
-            else:
-                empty += 1
-                # Round 0 is often unused; don't let it count towards stopping.
-                if rnd > 0 and empty >= MAX_EMPTY_ROUNDS:
-                    break
-        return events
+        entry = self.rounds.get(key)
+        if entry is None:
+            return False
+        now = datetime.now(timezone.utc)
+        age = now - datetime.fromisoformat(entry["fetched"])
+        days = [e.get("dateEvent") or "" for e in entry["events"]]
+        if entry["events"] and all(days):
+            first = min(date.fromisoformat(d) for d in days)
+            last = max(date.fromisoformat(d) for d in days)
+            if last < (now - timedelta(days=2)).date():
+                return True
+            if first <= (now + timedelta(days=14)).date():
+                return age < timedelta(hours=12)
+        spread = sum(key.encode()) % 72  # 0-71 extra hours, stable per round
+        return age < timedelta(days=5, hours=spread)
+
+
+@dataclass
+class FetchStats:
+    fetched: int = 0
+    stored: int = 0
+    stale: int = 0
+    missing: int = 0
+
+
+def season_events(
+    api: Api, store: RoundStore, league: int, season: int, stats: FetchStats
+) -> list[dict]:
+    """All events for a season, walked round by round.
+
+    The free API caps season listings at 15 events, but per-round queries
+    return the full round.
+    """
+    events: list[dict] = []
+    empty = 0
+    for rnd in range(0, MAX_ROUND + 1):
+        endpoint = f"eventsround.php?id={league}&r={rnd}&s={season}"
+        stored = store.events(endpoint)
+        if stored is not None and store.fresh(endpoint):
+            found = stored
+            stats.stored += 1
+        else:
+            try:
+                found = api.get(endpoint).get("events") or []
+                stats.fetched += 1
+                store.put(endpoint, found)
+            except FetchError as err:
+                if stored is not None:
+                    found = stored
+                    stats.stale += 1
+                else:
+                    if rnd > 0:
+                        log(f"  warning: round {rnd} of {season} unavailable: {err}")
+                        stats.missing += 1
+                    # Unknown is not the same as empty: keep walking, but once
+                    # the API is refusing everything, stop past the last
+                    # stored round.
+                    if api.blocked and rnd >= store.last_round(league, season):
+                        break
+                    continue
+        if found:
+            events.extend(found)
+            empty = 0
+        else:
+            empty += 1
+            # Round 0 is often unused; don't let it count towards stopping.
+            if rnd > 0 and empty >= MAX_EMPTY_ROUNDS:
+                break
+    return events
 
 
 # --------------------------------------------------------------------------
@@ -397,22 +519,23 @@ def render(events: list[Event], name: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def build(root: Path, cache_dir: Path | None, verbose: bool) -> list[Event]:
+def build(root: Path, store: RoundStore, verbose: bool) -> tuple[list[Event], int]:
+    """Return all events and how many came from the series feeds."""
     config = tomllib.loads((root / "config.toml").read_text(encoding="utf-8"))
     settings = config.get("settings", {})
     tz = ZoneInfo(settings.get("timezone", "UTC"))
     this_year = datetime.now(timezone.utc).year
     seasons = [this_year + off for off in settings.get("seasons", [0, 1])]
-    api = Api(cache_dir)
+    api = Api(float(settings.get("time_budget_minutes", 20)))
+    stats = FetchStats()
 
     events: list[Event] = []
     for series in config.get("series", []):
+        if verbose:
+            log(f"{series['name']}:")
         raw: list[dict] = []
         for season in seasons:
-            try:
-                raw += api.season_events(int(series["league"]), season)
-            except RuntimeError as err:
-                print(f"warning: {series['name']} {season}: {err}", file=sys.stderr)
+            raw += season_events(api, store, int(series["league"]), season, stats)
         rounds = to_sessions(raw, series)
         before = len(events)
         for key, sessions in rounds.items():
@@ -421,22 +544,32 @@ def build(root: Path, cache_dir: Path | None, verbose: bool) -> list[Event]:
             else:
                 events += single_events(sessions, series)
         if verbose:
-            print(f"{series['name']}: {len(events) - before} events", file=sys.stderr)
+            log(f"  {len(events) - before} events")
+    from_feeds = len(events)
 
     manual = manual_events(root / "events.toml")
     if verbose:
-        print(f"manual: {len(manual)} events", file=sys.stderr)
+        log(f"manual: {len(manual)} events")
+        log(
+            f"rounds: {stats.fetched} fetched, {stats.stored} reused (still fresh), "
+            f"{stats.stale} reused after a failed fetch, {stats.missing} unavailable; "
+            f"{api.requests} requests"
+        )
     events += manual
 
     events.sort(key=lambda e: (sort_key(Session("", e.start, 0)), e.summary))
-    return events
+    return events, from_feeds
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).parent)
     parser.add_argument("--output", type=Path, help="override settings.output")
-    parser.add_argument("--cache", type=Path, help="cache API responses here")
+    parser.add_argument(
+        "--store",
+        type=Path,
+        help="file keeping fetched rounds between runs (default .cache/rounds.json)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -447,10 +580,16 @@ def main() -> int:
     )
     name = config.get("settings", {}).get("calendar_name", "Racecal")
 
-    events = build(root, args.cache, args.verbose)
+    store = RoundStore(args.store or root / ".cache" / "rounds.json")
+    events, from_feeds = build(root, store, args.verbose)
+    store.save()
+    if from_feeds == 0:
+        # Don't replace a good published calendar with an empty one.
+        log("error: no events from any series feed; not writing the calendar")
+        return 1
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render(events, name), encoding="utf-8", newline="")
-    print(f"wrote {len(events)} events to {output}", file=sys.stderr)
+    log(f"wrote {len(events)} events to {output}")
     return 0
 
 

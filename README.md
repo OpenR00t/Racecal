@@ -79,12 +79,32 @@ for the series on the site; the number in the league page URL is the id.
 Requires Python 3.11 or newer and no extra packages.
 
 ```sh
-python racecal.py --verbose                 # writes public/racecal.ics
-python racecal.py --cache .cache --verbose  # reuse API responses between runs
+python racecal.py --verbose   # writes public/racecal.ics
 ```
 
-A full build takes a few minutes because requests are spaced out to stay
-within the free API rate limit.
+## How it stays within the API's rate limit
+
+The free API allows only a limited number of requests, and GitHub's shared
+runners can hit that limit quickly. Racecal keeps every round it has
+fetched in `.cache/rounds.json` (restored between workflow runs with
+`actions/cache`) and only asks the API again when a stored round is stale:
+
+- finished rounds are never fetched again;
+- rounds starting within two weeks, or under way, are refreshed every 12
+  hours;
+- rounds further out, and the empty rounds past a season's end, are
+  refreshed about weekly, spread over several days.
+
+A normal daily build makes a handful of requests. Rate-limit responses are
+retried with back-off (honouring `Retry-After`); a round that still fails
+uses its last stored copy, and after repeated refusals, or once
+`time_budget_minutes` is used up, the build finishes from stored data alone.
+Rounds missing from a bad run are fetched on the next one. If no series
+produced any events, the build exits with an error so the published
+calendar is left as it was.
+
+The first build starts with an empty store, so it makes around 200 requests
+and may take several runs to fill in completely if the API pushes back.
 
 ## Notes and limits
 
