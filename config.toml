@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 The Racecal contributors
+#
+# Racecal configuration
+#
+# Each [[series]] entry pulls one championship from TheSportsDB.
+#
+#   name     short label used as the event title prefix
+#   league   TheSportsDB league id
+#   group    true  = collapse every session of a round into ONE event
+#                    (start = first session, end = last session)
+#            false = one calendar event per session
+#   include  optional list of regexes; a session is kept only if its
+#            name matches at least one (case-insensitive)
+#   exclude  optional list of regexes; matching sessions are dropped
+#   duration default session length in minutes when the source has no
+#            end time (used for the last session of a grouped round too)
+#   long_sessions  { pattern, minutes } override for longer sessions
+#   group_by "season" groups a whole season instead of each round
+#   strip    regexes removed from session names to get the event name
+#            (grouped series only)
+#   title    fixed event title for grouped series; {season} is filled in
+#
+# Endurance races named "<N> Hours of ..." get N hours automatically.
+
+[settings]
+# Time zone used for the session list written into event descriptions.
+# Calendar apps always show the event itself in your local time.
+timezone = "UTC"
+# Seasons to fetch, relative to the current year (0 = this year).
+seasons = [0, 1]
+# Output file
+output = "public/racecal.ics"
+calendar_name = "Racecal"
+
+[[series]]
+name = "F1"
+league = 4370
+group = false
+duration = 60
+# Race and sprint sessions run longer than practice.
+long_sessions = { pattern = "(Grand Prix|Sprint)$", minutes = 120 }
+
+[[series]]
+name = "IndyCar"
+league = 4373
+group = false
+duration = 60
+long_sessions = { pattern = "^(?!.*(Practice|Qualifying)).*$", minutes = 150 }
+
+[[series]]
+name = "WEC"
+league = 4413
+group = false
+duration = 60
+exclude = ["Prologue"]
+
+[[series]]
+name = "DTM"
+league = 4438
+group = false
+duration = 60
+
+[[series]]
+name = "WRC"
+league = 4409
+group = true
+duration = 30
+# Rally name is the session name with these patterns removed.
+strip = ["\\s+SS\\d+.*$", "^WRC\\s+"]
+
+[[series]]
+name = "Dakar"
+league = 4447
+group = true
+# Each stage is its own round in the source, so group the whole season.
+group_by = "season"
+title = "Dakar Rally {season}"
+duration = 0

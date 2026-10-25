@@ -1,0 +1,56 @@
+name: Build and publish calendar
+
+on:
+  schedule:
+    - cron: "17 9 * * *"   # daily
+  workflow_dispatch:        # manual "Run workflow" button
+  push:
+    branches: [main]
+    paths:
+      - "config.toml"
+      - "events.toml"
+      - "racecal.py"
+      - ".github/workflows/publish.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build calendar
+        run: python racecal.py --verbose
+
+      - name: Add index page
+        run: |
+          cat > public/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>Racecal</title>
+          <p>Subscribe to <a href="racecal.ics">racecal.ics</a> in your calendar app.</p>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
