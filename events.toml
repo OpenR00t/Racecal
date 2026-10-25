@@ -1,88 +1,41 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 The Racecal contributors
 #
-# Events without a usable data feed, maintained by hand.
+# Hand-kept events, used only to fill gaps in the feeds: an event here is
+# skipped when a feed already has an event for the same series (the part of
+# the title before " · ") on overlapping dates.
 #
 # Dates are inclusive. Use `start`/`end` as dates (all-day events), or add
 # `start_time` (UTC, "HH:MM") to make the first day a timed start.
-#
-# Dakar is pulled automatically (see config.toml), so it is not listed
-# under W2RC here.
 
-# --- FIA-FIM World Rally-Raid Championship (W2RC) ---------------------
-
-[[event]]
-series = "W2RC"
-name = "Abu Dhabi Desert Challenge"
-location = "Abu Dhabi, UAE"
-start = 2026-11-22
-end = 2026-11-27
+# --- W2RC 2027 ---------------------------------------------------------
+# Approved by the FIA but not yet on its calendar page; these drop out
+# automatically once the FIA publishes the 2027 calendar.
 
 [[event]]
 series = "W2RC"
 name = "Abu Dhabi Desert Challenge"
-location = "Abu Dhabi, UAE"
+location = "UAE"
 start = 2027-03-21
 end = 2027-03-26
 
 [[event]]
 series = "W2RC"
 name = "South African Safari Rally"
-location = "South Africa"
+location = "RSA"
 start = 2027-06-14
 end = 2027-06-19
 
 [[event]]
 series = "W2RC"
 name = "BP Ultimate Rally-Raid Portugal"
-location = "Portugal"
+location = "POR"
 start = 2027-09-21
 end = 2027-09-26
 
 [[event]]
 series = "W2RC"
 name = "Rallye du Maroc"
-location = "Morocco"
+location = "MAR"
 start = 2027-10-24
 end = 2027-10-29
-
-# --- SCORE World Desert Championship (Baja) --------------------------
-
-[[event]]
-series = "SCORE"
-name = "San Felipe 250"
-location = "San Felipe, Baja California"
-start = 2026-03-25
-end = 2026-03-29
-
-[[event]]
-series = "SCORE"
-name = "Baja 500"
-location = "Ensenada, Baja California"
-start = 2026-06-03
-end = 2026-06-07
-
-[[event]]
-series = "SCORE"
-name = "Baja 400"
-location = "Baja California"
-start = 2026-09-09
-end = 2026-09-13
-
-[[event]]
-series = "SCORE"
-name = "Baja 1000"
-location = "Los Cabos, Baja California Sur"
-start = 2026-11-09
-end = 2026-11-15
-notes = "Event week including contingency and qualifying; race days fall at the end of the week."
-
-# --- Ultra4 ------------------------------------------------------------
-
-[[event]]
-series = "Ultra4"
-name = "King of the Hammers"
-location = "Johnson Valley, CA"
-start = 2027-01-21
-end = 2027-02-06
-notes = "Full race week. See the official schedule for individual race days."

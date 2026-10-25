@@ -11,6 +11,11 @@
 #                              (f1, indycar, f2, f3, fe, motogp, f1-academy)
 #               "fiawec"       the official FIA WEC website
 #               "thesportsdb"  TheSportsDB free API; needs `league` (id)
+#               "fia"          an fia.com championship calendar (event dates
+#                              only); needs `championship` (the URL part
+#                              after /events/)
+#               "scoreraceinfo" SCORE desert races (score-raceinfo.com)
+#               "kingofthehammers" King of the Hammers race-week schedule
 #   group     true  = collapse every session of a round into ONE event
 #                     (start = first session, end = last session)
 #             false = one calendar event per session
@@ -93,3 +98,24 @@ group_by = "season"
 listing = "season"   # one request per season (fewer than 15 stages)
 title = "Dakar Rally {season}"
 duration = 0
+
+[[series]]
+name = "W2RC"
+source = "fia"
+championship = "fia-world-rally-raid-championship"
+group = false
+exclude = ["Dakar"]   # comes from the Dakar block above, with stage days
+
+[[series]]
+name = "SCORE"
+source = "scoreraceinfo"
+group = false
+
+[[series]]
+name = "KOH"
+source = "kingofthehammers"
+group = false
+# Races only: drop gates, registration, meetings, awards, power hours and
+# the youth race.
+exclude = ["Gates", "Registration", "Check-In", "Meeting", "Awards",
+           "Prerunning", "POWER HOUR", "Kids"]

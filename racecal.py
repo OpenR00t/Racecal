@@ -58,6 +58,7 @@ class Session:
     minutes: int = 0  # 0 = not known yet (see apply_duration)
     venue: str = ""
     uid: str = ""
+    end_day: date | None = None  # last day (inclusive) of a date-only span
 
     @property
     def timed(self) -> bool:
@@ -499,10 +500,188 @@ def source_thesportsdb(series: dict, ctx: Context) -> list[Round]:
     return rounds
 
 
+MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def month_number(text: str) -> int:
+    return MONTHS[text.strip(". ").lower()[:3]]
+
+
+def _fia_calendar(body: bytes) -> list[dict]:
+    """FIA championship calendar page -> [{name, country, from, to}]."""
+    html = body.decode("utf-8", errors="replace")
+    items = []
+    for block in re.split(r'<div class="event-item', html)[1:]:
+        def text(cls: str, chunk: str = block) -> str:
+            m = re.search(rf'class="{cls}[^"]*"[^>]*>(.*?)</div>', chunk, re.S)
+            return re.sub(r"<[^>]+>|\s+", " ", m.group(1)).strip() if m else ""
+        frm = re.search(r'class="from-date.*?class="day">(\d+)<.*?class="month">(\w+)<', block, re.S)
+        to = re.search(r'class="to-date.*?class="day">(\d+)<.*?class="month">(\w+)<', block, re.S)
+        name = text("event-name")
+        if not (frm and name):
+            continue
+        items.append({
+            "name": name,
+            "country": text("country"),
+            "from": [int(frm.group(1)), month_number(frm.group(2))],
+            "to": [int(to.group(1)), month_number(to.group(2))] if to else None,
+        })
+    if not items:
+        raise ValueError("no events found on calendar page")
+    return items
+
+
+def source_fia(series: dict, ctx: Context) -> list[Round]:
+    """fia.com championship calendars: event dates (no session times).
+
+    Season pages appear once the FIA publishes them; until then a season
+    is simply missing (and events.toml can fill the gap).
+    """
+    client = ctx.clients["fia"]
+    champ = series["championship"]
+    rounds: list[Round] = []
+    for season in ctx.seasons:
+        items = ctx.store.get(
+            f"fia/{champ}/{season}", client,
+            f"https://www.fia.com/events/{champ}/season-{season}/{season}-calendar",
+            _fia_calendar,
+            lambda d, y=season: [f"{y}-{i['from'][1]:02d}-{i['from'][0]:02d}" for i in d],
+        )
+        for item in items or []:
+            day, month = item["from"]
+            start = date(season, month, day)
+            if item["to"]:
+                tday, tmonth = item["to"]
+                end = date(season + (tmonth < month), tmonth, tday)
+            else:
+                end = start
+            slug = re.sub(r"[^a-z0-9]+", "-", item["name"].lower()).strip("-")
+            rnd = Round(key=f"{season}-{slug}", name=item["name"])
+            rnd.sessions.append(Session(
+                name=item["name"], label=item["name"], start=start, end_day=end,
+                venue=item["country"], uid=f"fia-{champ}-{season}-{slug}@racecal",
+            ))
+            rounds.append(rnd)
+    return rounds
+
+
+SCORE_DATES = re.compile(
+    r"(\d+)(?:st|nd|rd|th)\s+([A-Z][\w' .]*?(?:\d{3,4}|Challenge))\s*[–-]\s*"
+    r"([A-Z][a-z]{2,8})\.?\s+(\d{1,2})\s*[-–]\s*(?:([A-Z][a-z]{2,8})\.?\s+)?"
+    r"(\d{1,2}),\s*(\d{4})"
+)
+
+
+def _score_dates(body: bytes) -> list[dict]:
+    pages = json.loads(body)
+    found: dict[tuple, dict] = {}
+    for page in pages:
+        text = re.sub(r"<[^>]+>", "\n", page.get("content", {}).get("rendered", ""))
+        text = text.replace("&#8217;", "'").replace("&#8211;", "–")
+        for m in SCORE_DATES.finditer(text):
+            edition, name, m1, d1, m2, d2, year = m.groups()
+            y = int(year)
+            start = date(y, month_number(m1), int(d1))
+            end = date(y, month_number(m2 or m1), int(d2))
+            found[(name.strip(), y)] = {
+                "name": name.strip(), "edition": int(edition),
+                "start": start.isoformat(), "end": end.isoformat(),
+            }
+    if not found:
+        raise ValueError("no race dates found")
+    return sorted(found.values(), key=lambda r: r["start"])
+
+
+def source_scoreraceinfo(series: dict, ctx: Context) -> list[Round]:
+    """score-raceinfo.com: each page lists the season's race dates, e.g.
+    "59th Baja 1000 – Nov. 9-15, 2026". Read from the 20 latest pages."""
+    races = ctx.store.get(
+        "score/dates", ctx.clients["score"],
+        "https://score-raceinfo.com/wp-json/wp/v2/pages"
+        "?orderby=modified&order=desc&per_page=20&_fields=content",
+        _score_dates, lambda d: [r["start"] for r in d] + [r["end"] for r in d],
+    ) or []
+    rounds = []
+    for race in races:
+        start, end = date.fromisoformat(race["start"]), date.fromisoformat(race["end"])
+        if start.year not in ctx.seasons:
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", race["name"].lower()).strip("-")
+        rnd = Round(key=f"{start.year}-{slug}", name=race["name"])
+        rnd.sessions.append(Session(
+            name=race["name"], label=race["name"], start=start, end_day=end,
+            uid=f"score-{start.year}-{slug}@racecal",
+        ))
+        rounds.append(rnd)
+    return rounds
+
+
+KOH_SECTION = re.compile(r"^(.+?)\s*\(\s*\w{3,9}\s+\d{1,2}\s*[-–]\s*\w{3,9}\s+\d{1,2}\s*\)$")
+KOH_DAY = re.compile(r"^([A-Z][a-z]+)\s+(\d{1,2}),\s*(\d{4})$")
+KOH_ITEM = re.compile(
+    r"^(\d{1,2}:\d{2}\s*[AP]M)\s*(?:[-–]\s*(\d{1,2}:\d{2}\s*[AP]M))?\s*[-–]\s*(.+)$", re.I
+)
+
+
+def _koh_schedule(body: bytes) -> list[dict]:
+    pages = json.loads(body)
+    if not pages:
+        return []
+    text = re.sub(r"<[^>]+>", "\n", pages[0]["content"]["rendered"])
+    text = text.replace("&#8211;", "–").replace("&amp;", "&")
+    section, day, items = "", None, []
+    for line in (l.strip() for l in text.split("\n")):
+        if not line:
+            continue
+        if m := KOH_SECTION.match(line):
+            section = re.sub(r"\s+\d{4}$", "", m.group(1)).strip()
+        elif m := KOH_DAY.match(line):
+            day = date(int(m.group(3)), month_number(m.group(1)), int(m.group(2)))
+        elif day and (m := KOH_ITEM.match(line)):
+            items.append({"section": section, "day": day.isoformat(),
+                          "start": m.group(1).upper().replace(" ", ""),
+                          "end": (m.group(2) or "").upper().replace(" ", ""),
+                          "name": re.sub(r"\s+", " ", m.group(3)).strip(" -–")})
+    return items
+
+
+def source_kingofthehammers(series: dict, ctx: Context) -> list[Round]:
+    """kingofthehammers.com/<year>-koh-schedule (times are Pacific)."""
+    tz = ZoneInfo("America/Los_Angeles")
+    rounds: dict[str, Round] = {}
+    for season in ctx.seasons:
+        items = ctx.store.get(
+            f"koh/{season}", ctx.clients["koh"],
+            f"https://kingofthehammers.com/wp-json/wp/v2/pages?slug={season}-koh-schedule"
+            "&_fields=content",
+            _koh_schedule, lambda d: [i["day"] for i in d],
+        ) or []
+        for i, item in enumerate(items):
+            day = date.fromisoformat(item["day"])
+            start = datetime.combine(day, datetime.strptime(item["start"], "%I:%M%p").time(), tz)
+            minutes = 0
+            if item["end"]:
+                end = datetime.combine(day, datetime.strptime(item["end"], "%I:%M%p").time(), tz)
+                minutes = max(int((end - start).total_seconds() // 60), 0)
+            section = item["section"] or "King of the Hammers"
+            key = f"{season}-{re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-')}"
+            rnd = rounds.setdefault(key, Round(key=key, name=section))
+            rnd.sessions.append(Session(
+                name=item["name"], label=item["name"],
+                start=start.astimezone(timezone.utc), minutes=minutes,
+                venue="Johnson Valley, CA", uid=f"koh-{season}-{i}@racecal",
+            ))
+    return list(rounds.values())
+
+
 SOURCES = {
     "sportstimes": source_sportstimes,
     "fiawec": source_fiawec,
     "thesportsdb": source_thesportsdb,
+    "fia": source_fia,
+    "scoreraceinfo": source_scoreraceinfo,
+    "kingofthehammers": source_kingofthehammers,
 }
 
 
@@ -556,7 +735,7 @@ def grouped_event(rnd: Round, series: dict, tz: ZoneInfo) -> Event:
     if first.timed:
         end = max((s.end for s in sessions if s.timed), default=first.end)
     else:
-        last_day = last.start.date() if last.timed else last.start
+        last_day = last.start.date() if last.timed else (last.end_day or last.start)
         end = last_day + timedelta(days=1)
     return Event(
         uid=f"racecal-{series['name'].lower()}-{rnd.key}@racecal",
@@ -574,7 +753,7 @@ def single_events(rnd: Round, series: dict) -> list[Event]:
             uid=s.uid,
             summary=f"{series['name']} · {s.name}",
             start=s.start,
-            end=s.end if s.timed else s.start + timedelta(days=1),
+            end=s.end if s.timed else (s.end_day or s.start) + timedelta(days=1),
             location=s.venue,
         )
         for s in rnd.sessions
@@ -695,6 +874,9 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "sportstimes": Client("GitHub", 0.2, deadline),
             "fiawec": Client("fiawec.com", 1.0, deadline),
             "thesportsdb": Client("TheSportsDB", 2.5, deadline),
+            "fia": Client("fia.com", 1.0, deadline),
+            "score": Client("score-raceinfo.com", 1.0, deadline),
+            "koh": Client("kingofthehammers.com", 1.0, deadline),
         },
         seasons=[this_year + off for off in settings.get("seasons", [0, 1])],
     )
@@ -724,7 +906,22 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
         if verbose:
             log(f"  {counts[series['name']]} events")
 
-    manual = manual_events(root / "events.toml")
+    # Hand-kept events fill gaps only: one is dropped when a feed already
+    # has an event for the same series on overlapping dates.
+    def span(e: Event) -> tuple[date, date]:
+        s = e.start.date() if isinstance(e.start, datetime) else e.start
+        en = e.end.date() if isinstance(e.end, datetime) else e.end - timedelta(days=1)
+        return s, en
+    fed: dict[str, list[tuple[date, date]]] = {}
+    for e in events:
+        fed.setdefault(e.summary.split(" · ")[0], []).append(span(e))
+    manual = []
+    for e in manual_events(root / "events.toml"):
+        s, en = span(e)
+        series_spans = fed.get(e.summary.split(" · ")[0], [])
+        if any(s <= b and a <= en for a, b in series_spans):
+            continue
+        manual.append(e)
     events += manual
     if verbose:
         log(f"manual: {len(manual)} events")

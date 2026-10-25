@@ -18,9 +18,9 @@ your own reminders and no app notifications.
 | DTM | TheSportsDB | one event per session |
 | WRC | TheSportsDB | **one event per rally**, from the first stage to the last |
 | Dakar | TheSportsDB | **one event per edition**, all-day across the stage days |
-| W2RC (other rounds) | `events.toml` | one all-day event per rally |
-| SCORE Baja series | `events.toml` | one all-day event per race week |
-| King of the Hammers | `events.toml` | one all-day event for race week |
+| W2RC (other rounds) | [fia.com](https://www.fia.com) championship calendar | one all-day event per rally |
+| SCORE Baja series | [score-raceinfo.com](https://score-raceinfo.com) | one all-day event per race week |
+| King of the Hammers | [kingofthehammers.com](https://kingofthehammers.com) schedule | one event per race, with start and end times |
 
 All times are written in UTC; calendar apps convert them to your local
 time. Grouped events (WRC, Dakar) carry the full session list in their
@@ -67,16 +67,25 @@ documents every option.
 Set `settings.timezone` (for example `"Europe/London"`) to have the
 session lists inside grouped events shown in that zone.
 
-### Events without a feed — `events.toml`
+### Filling gaps by hand — `events.toml`
 
 Add an `[[event]]` block with `series`, `name`, `start` and `end` dates
 (inclusive). Add `start_time = "HH:MM"` (UTC) for a timed first day.
+
+These only fill gaps: an event is skipped when a feed already has an event
+for the same series name on overlapping dates. That makes it safe to enter
+an announced date ahead of its source (for example a W2RC season before the
+FIA posts its calendar page) and leave it there.
 
 ### Adding a series
 
 - **sportstimes** also has F2 (`f2`), F3 (`f3`), Formula E (`fe`), MotoGP
   (`motogp`) and F1 Academy (`f1-academy`); set `key` to the folder name
   under `_db/` in that repository.
+- **fia** reads any championship calendar on fia.com, such as
+  `world-rally-championship` or `fia-world-endurance-championship`; set
+  `championship` to the part of the calendar URL after `/events/`. It has
+  event dates but no session times.
 - **thesportsdb** covers many more championships; set `league` to the
   number in the league's page URL on [TheSportsDB](https://www.thesportsdb.com).
   Prefer another source where one exists (see below).
@@ -130,6 +139,11 @@ almost all of it spent waiting on TheSportsDB.
   in the other year appears once the season page links it.
 - sportstimes publishes a season's file when the calendar is set, so next
   year's F1 and IndyCar appear later than other series.
+- SCORE dates are read from the season list repeated on score-raceinfo.com's
+  pages ("59th Baja 1000 – Nov. 9-15, 2026"); King of the Hammers times are
+  read from its schedule page and are Pacific time. Both are page text
+  rather than data feeds, so a site redesign can break them; the build then
+  keeps using the last stored copy and logs a warning.
 
 ## License
 
@@ -139,5 +153,7 @@ Licensed under the GNU Affero General Public License v3.0 or later. See
 [LICENSE](LICENSE).
 
 Schedule data comes from [sportstimes/f1](https://github.com/sportstimes/f1),
-[fiawec.com](https://www.fiawec.com) and [TheSportsDB](https://www.thesportsdb.com)
-and remains subject to their terms.
+[fiawec.com](https://www.fiawec.com), [fia.com](https://www.fia.com),
+[score-raceinfo.com](https://score-raceinfo.com),
+[kingofthehammers.com](https://kingofthehammers.com) and
+[TheSportsDB](https://www.thesportsdb.com) and remains subject to their terms.
