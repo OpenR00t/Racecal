@@ -96,8 +96,14 @@ def start_key(value: datetime | date) -> datetime:
     return datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
 
 
-def parse_time(stamp: str) -> datetime | date | None:
-    """ISO timestamp -> UTC datetime; midnight local time -> date (unknown)."""
+def parse_time(stamp: str, midnight_unknown: bool = True) -> datetime | date | None:
+    """ISO timestamp -> UTC datetime.
+
+    Some sources (TheSportsDB, the WEC site) write midnight when a time
+    hasn't been announced; with `midnight_unknown` that becomes a bare
+    date. Sources with real UTC times pass False, since a session at
+    00:00 UTC (8 pm in New York) is genuine.
+    """
     if not stamp:
         return None
     try:
@@ -109,8 +115,7 @@ def parse_time(stamp: str) -> datetime | date | None:
             return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    # Sources use midnight as a placeholder for "time not announced".
-    if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+    if midnight_unknown and dt.hour == 0 and dt.minute == 0 and dt.second == 0:
         return dt.date()
     return dt.astimezone(timezone.utc)
 
@@ -323,7 +328,7 @@ def source_sportstimes(series: dict, ctx: Context) -> list[Round]:
                 name += suffix
             rnd = Round(key=f"{season}-r{race.get('round')}", name=name)
             for skey, stamp in race.get("sessions", {}).items():
-                start = parse_time(stamp)
+                start = parse_time(stamp, midnight_unknown=False)
                 if start is None:
                     continue
                 label = label_from_key(skey)
@@ -723,8 +728,8 @@ def source_dtm(series: dict, ctx: Context) -> list[Round]:
         for i, item in enumerate(detail.get("timetable") or []):
             if item.get("raceSeries") != wanted:
                 continue
-            start = parse_time(item.get("start", ""))
-            end = parse_time(item.get("end", ""))
+            start = parse_time(item.get("start", ""), midnight_unknown=False)
+            end = parse_time(item.get("end", ""), midnight_unknown=False)
             if not isinstance(start, datetime):
                 continue
             minutes = 0
@@ -964,7 +969,34 @@ def grouped_event(rnd: Round, series: dict, tz: ZoneInfo) -> Event:
     )
 
 
-def single_events(rnd: Round, series: dict) -> list[Event]:
+def collapse_untimed(rnd: Round, series: dict, tz: ZoneInfo) -> list[Event]:
+    """Sessions without announced times, as one all-day event per round.
+
+    Sources list future sessions before their times are known; one entry
+    per session would stack up as separate all-day events. Once times are
+    published the sessions replace this event on the next build.
+    """
+    untimed = [s for s in rnd.sessions if not s.timed]
+    first = min(s.start for s in untimed)
+    last = max(s.end_day or s.start for s in untimed)
+    every = len(untimed) == len(rnd.sessions)
+    title = rnd.name if every else f"{rnd.name} · Other sessions (times TBA)"
+    return [Event(
+        uid=f"racecal-{series['name'].lower()}-{rnd.key}-tba@racecal",
+        summary=f"{series['name']} · {title}",
+        start=first,
+        end=last + timedelta(days=1),
+        location=next((s.venue for s in untimed if s.venue), ""),
+        description="Times not announced yet:\n" + "\n".join(
+            fmt_session(s, tz) for s in untimed),
+    )]
+
+
+def single_events(rnd: Round, series: dict, tz: ZoneInfo | None = None) -> list[Event]:
+    untimed = [s for s in rnd.sessions if not s.timed]
+    if len(untimed) > 1 and tz is not None:
+        timed = Round(rnd.key, rnd.name, [s for s in rnd.sessions if s.timed])
+        return single_events(timed, series) + collapse_untimed(rnd, series, tz)
     return [
         Event(
             uid=s.uid,
@@ -1142,7 +1174,7 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             if series.get("group"):
                 events.append(grouped_event(rnd, series, tz))
             else:
-                events += single_events(rnd, series)
+                events += single_events(rnd, series, tz)
         counts[series["name"]] = len(events) - before
         if verbose:
             log(f"  {counts[series['name']]} events")
