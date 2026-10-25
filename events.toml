@@ -39,3 +39,39 @@ name = "Rallye du Maroc"
 location = "MAR"
 start = 2027-10-24
 end = 2027-10-29
+
+# --- SCORE 2027 --------------------------------------------------------
+# From SCORE's published 2027 schedule (score-raceinfo.com, July 2026).
+# The race-info pages still list 2026, so these fill in until they switch.
+# San Felipe 250 becomes the Baja 250 in Mexicali for 2027.
+
+[[event]]
+series = "SCORE"
+name = "Baja 250"
+location = "Mexicali, Baja California"
+start = 2027-03-17
+end = 2027-03-21
+notes = "Race starts March 20."
+
+[[event]]
+series = "SCORE"
+name = "Baja 500"
+location = "Ensenada, Baja California"
+start = 2027-06-02
+end = 2027-06-06
+notes = "Race starts June 5."
+
+[[event]]
+series = "SCORE"
+name = "Baja 400"
+location = "Ensenada, Baja California"
+start = 2027-09-08
+end = 2027-09-12
+notes = "Race starts September 11."
+
+[[event]]
+series = "SCORE"
+name = "Baja 1000"
+location = "Ensenada, Baja California"
+start = 2027-11-14
+end = 2027-11-20

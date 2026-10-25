@@ -10,6 +10,12 @@
 #               "sportstimes"  github.com/sportstimes/f1 data; needs `key`
 #                              (f1, indycar, f2, f3, fe, motogp, f1-academy)
 #               "fiawec"       the official FIA WEC website
+#               "dtm"          the API behind dtm.com
+#               "dakar"        dakar.com's official route page (next edition)
+#               "wrcdata"      the WRC+ app's data store (stage times); per-
+#                              rally time zones come from the country, and
+#                              `timezones = { "<regex on rally name>" = "<IANA>" }`
+#                              adds or overrides them
 #               "thesportsdb"  TheSportsDB free API; needs `league` (id)
 #               "fia"          an fia.com championship calendar (event dates
 #                              only); needs `championship` (the URL part
@@ -26,6 +32,10 @@
 #   duration  session length in minutes when nothing better is known
 #   durations optional [{ pattern, minutes }] overrides by session label
 #
+#   skip      optional regexes for cancelled events a source still lists,
+#             matched against "<year> <event name>", e.g. "^2026 Rally Saudi"
+#   fallback  optional { source = ..., <its options> } used for seasons the
+#             main source has nothing for (e.g. next season not loaded yet)
 #   race_hours optional { "<regex on event name>" = hours } for races
 #             whose name doesn't say how long they are
 #
@@ -76,28 +86,26 @@ race_hours = { "Lone Star" = 6, "1812" = 10 }
 
 [[series]]
 name = "DTM"
-source = "thesportsdb"
-league = 4438
+source = "dtm"
 group = false
 duration = 60
 
 [[series]]
 name = "WRC"
-source = "thesportsdb"
-league = 4409
+source = "wrcdata"
 group = true
 duration = 30
-strip = ["\\s+SS\\d+.*$", "^WRC\\s+"]
+# Seasons the WRC+ data doesn't have yet (next season) come from here.
+fallback = { source = "thesportsdb", league = 4409, strip = ["\\s+SS\\d+.*$", "^WRC\\s+"] }
 
 [[series]]
 name = "Dakar"
-source = "thesportsdb"
-league = 4447
+source = "dakar"
 group = true
-group_by = "season"
-listing = "season"   # one request per season (fewer than 15 stages)
 title = "Dakar Rally {season}"
 duration = 0
+# dakar.com only shows the next edition; earlier ones come from here.
+fallback = { source = "thesportsdb", league = 4447, group_by = "season", listing = "season" }
 
 [[series]]
 name = "W2RC"

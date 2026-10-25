@@ -15,9 +15,9 @@ your own reminders and no app notifications.
 | Formula 1 | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
 | IndyCar | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
 | WEC | [fiawec.com](https://www.fiawec.com) (official site) | one event per session |
-| DTM | TheSportsDB | one event per session |
-| WRC | TheSportsDB | **one event per rally**, from the first stage to the last |
-| Dakar | TheSportsDB | **one event per edition**, all-day across the stage days |
+| DTM | dtm.com's own API | one event per session, with real end times |
+| WRC | the WRC+ app's data (next season from TheSportsDB until it's loaded) | **one event per rally**, from the first stage to the last |
+| Dakar | [dakar.com](https://www.dakar.com/en/overall-route) official route (past editions from TheSportsDB) | **one event per edition**, all-day across the stage days |
 | W2RC (other rounds) | [fia.com](https://www.fia.com) championship calendar | one all-day event per rally |
 | SCORE Baja series | [score-raceinfo.com](https://score-raceinfo.com) | one all-day event per race week |
 | King of the Hammers | [kingofthehammers.com](https://kingofthehammers.com) schedule | one event per race, with start and end times |
@@ -102,7 +102,8 @@ python racecal.py --verbose   # writes public/racecal.ics
 
 TheSportsDB's free API is shared by everyone using its public key and
 throttles hard (on GitHub's runners, about 10 requests before a two-minute
-pause), so it is only used for series with no better source. sportstimes
+pause), so it is only used as a fallback for seasons the main sources don't have
+(next year's WRC, past Dakar editions). sportstimes
 data is one file per season, and the WEC site is a page per race.
 
 Racecal keeps everything it fetches in `.cache/store.json` (restored
@@ -134,11 +135,22 @@ almost all of it spent waiting on TheSportsDB.
 - Session end times are estimated where the source has none (`duration`,
   `durations` and `race_hours` in `config.toml`); endurance races named
   "N Hours of …" use N hours.
-- The WEC season page doesn't link every race, so each race is also looked
-  up under the other season's year; a brand-new event with no counterpart
-  in the other year appears once the season page links it.
+- WEC races are taken only from the races the season pages link. Pages for
+  races dropped from the calendar stay online, still marked as scheduled
+  with their old dates (Qatar and Bahrain 2026, for example).
+- Sources sometimes keep listing a cancelled event. Hide it with `skip` in
+  that series' `config.toml` block (regexes on "<year> <event name>"), and
+  add a corrected placeholder to `events.toml` if needed.
 - sportstimes publishes a season's file when the calendar is set, so next
   year's F1 and IndyCar appear later than other series.
+- The DTM and WRC sources are the APIs behind dtm.com and the WRC+ app.
+  They are not documented public APIs and could change without notice; the
+  build keeps using stored data if they do.
+- WRC stage times are published in local time. The time zone comes from
+  each rally's country (`WRC_TIMEZONES` in `racecal.py`); add or override
+  one in `config.toml` with `timezones = { "<regex on rally name>" =
+  "<IANA zone>" }`. A rally with no known zone gets all-day stages and a
+  warning in the build log.
 - SCORE dates are read from the season list repeated on score-raceinfo.com's
   pages ("59th Baja 1000 – Nov. 9-15, 2026"); King of the Hammers times are
   read from its schedule page and are Pacific time. Both are page text

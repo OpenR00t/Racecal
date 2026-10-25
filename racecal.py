@@ -15,6 +15,8 @@ Uses only the Python standard library (3.11+).
 from __future__ import annotations
 
 import argparse
+import gzip
+import http.client
 import json
 import re
 import sys
@@ -161,6 +163,9 @@ class Client:
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     body = resp.read()
+                # Some APIs gzip responses even when not asked to.
+                if body[:2] == b"\x1f\x8b":
+                    body = gzip.decompress(body)
                 self._failures = 0
                 return body
             except urllib.error.HTTPError as err:
@@ -175,8 +180,10 @@ class Client:
                     # the limit again straight away.
                     self.gap = max(self.gap, int(retry_after) / 9)
                 reason = f"HTTP {err.code}"
-            except (urllib.error.URLError, TimeoutError) as err:
-                pause, reason = backoff, type(err).__name__
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as err:
+                # Includes dropped connections (RemoteDisconnected, resets),
+                # which usually succeed on a quick retry.
+                pause, reason = 3 * (attempt + 1), type(err).__name__
             if attempt < len(RETRY_BACKOFF) - 1:
                 log(f"  {self.name}: {reason}, waiting {pause}s")
                 time.sleep(pause)
@@ -356,8 +363,9 @@ def _wec_race_json(body: bytes) -> dict | None:
 def source_fiawec(series: dict, ctx: Context) -> list[Round]:
     """fiawec.com: race pages carry schema.org SportsEvent JSON-LD.
 
-    The season page links most race pages but leaves out the next
-    upcoming one, so each slug is also tried with the other seasons' years.
+    Only races linked from the season pages are used. Pages for races that
+    were dropped from the calendar stay online, still marked as scheduled
+    with their old dates, so slugs must not be guessed.
     """
     client = ctx.clients["fiawec"]
     excluded = ("prologue", "test")
@@ -370,13 +378,9 @@ def source_fiawec(series: dict, ctx: Context) -> list[Round]:
             lambda d: [],
         )
         slugs.update(found or [])
-    slugs = {s for s in slugs if not any(x in s for x in excluded)}
     years = {str(y) for y in ctx.seasons}
-    candidates = set()
-    for slug in slugs:
-        base, year = slug.rsplit("-", 1)
-        if year in years:
-            candidates.update(f"{base}-{y}" for y in years)
+    candidates = {s for s in slugs
+                  if s.rsplit("-", 1)[-1] in years and not any(x in s for x in excluded)}
 
     rounds: list[Round] = []
     for slug in sorted(candidates):
@@ -675,7 +679,220 @@ def source_kingofthehammers(series: dict, ctx: Context) -> list[Round]:
     return list(rounds.values())
 
 
+DTM_API = "https://api.dtm.com/data"
+DTM_LABEL_FIXES = {"qualiyfing": "qualifying"}
+
+
+def _dtm_label(label: str) -> str:
+    words = []
+    for w in label.split():
+        w = DTM_LABEL_FIXES.get(w.lower(), w)
+        words.append(w[:1].upper() + w[1:])
+    return " ".join(words)
+
+
+def source_dtm(series: dict, ctx: Context) -> list[Round]:
+    """api.dtm.com: the JSON API behind dtm.com.
+
+    `events` lists every weekend; `eventDetails` has the timetable, which
+    also holds support races and fan events, so only entries whose
+    raceSeries is the configured one (default "DTM") are kept. Weekends
+    without a timetable yet become all-day events.
+    """
+    client = ctx.clients["dtm"]
+    wanted = series.get("race_series", "DTM")
+    local = ZoneInfo(series.get("timezone", "Europe/Berlin"))
+    listing = ctx.store.get(
+        "dtm/events", client, f"{DTM_API}?query=events&lang=en",
+        lambda b: json.loads(b).get("events") or [], lambda d: [],
+    ) or []
+    years = {str(y) for y in ctx.seasons}
+    rounds: list[Round] = []
+    for ev in listing:
+        slug = ev.get("slug", "")
+        if not slug or slug[-4:] not in years or wanted not in (ev.get("raceSeries") or []):
+            continue
+        detail = ctx.store.get(
+            f"dtm/event/{slug}", client,
+            f"{DTM_API}?query=eventDetails&slug={slug}&lang=en",
+            lambda b: (json.loads(b).get("events") or [{}])[0],
+            lambda d: [d.get("startTime", ""), d.get("endTime", "")],
+        ) or ev
+        name = detail.get("name") or ev.get("name") or slug
+        rnd = Round(key=slug, name=name)
+        for i, item in enumerate(detail.get("timetable") or []):
+            if item.get("raceSeries") != wanted:
+                continue
+            start = parse_time(item.get("start", ""))
+            end = parse_time(item.get("end", ""))
+            if not isinstance(start, datetime):
+                continue
+            minutes = 0
+            if isinstance(end, datetime) and end > start:
+                minutes = int((end - start).total_seconds() // 60)
+            label = _dtm_label(item.get("label") or "Session")
+            rnd.sessions.append(Session(
+                name=f"{name} · {label}", label=label, start=start, minutes=minutes,
+                venue=name, uid=f"dtm-{slug}-{i}@racecal",
+            ))
+        if not rnd.sessions:
+            # No timetable yet: an all-day event over the weekend, with the
+            # dates taken in local time (the API stores local midnights).
+            s = datetime.fromisoformat(ev["startTime"]).astimezone(local).date()
+            e = datetime.fromisoformat(ev["endTime"]).astimezone(local).date()
+            rnd.sessions.append(Session(
+                name=name, label="Weekend", start=s, end_day=e, venue=name,
+                uid=f"dtm-{slug}-weekend@racecal",
+            ))
+        rounds.append(rnd)
+    return rounds
+
+
+WRCDATA = "https://webappsdata.wrc.com/srv/wrc/json/api/wrcsrv"
+# Stage times are local; the data has no usable time zone, so map the
+# rally's country flag (and a few rallies by name) to one.
+WRC_TIMEZONES = {
+    "MON": "Europe/Monaco", "SWE": "Europe/Stockholm", "KEN": "Africa/Nairobi",
+    "CRO": "Europe/Zagreb", "HRV": "Europe/Zagreb", "ESP": "Europe/Madrid",
+    "POR": "Europe/Lisbon", "PRT": "Europe/Lisbon", "JPN": "Asia/Tokyo",
+    "GRE": "Europe/Athens", "GRC": "Europe/Athens", "EST": "Europe/Tallinn",
+    "FIN": "Europe/Helsinki", "JAP": "Asia/Tokyo", "PAR": "America/Asuncion", "PRY": "America/Asuncion",
+    "CHL": "America/Santiago", "CHI": "America/Santiago", "ITA": "Europe/Rome",
+    "SAU": "Asia/Riyadh", "KSA": "Asia/Riyadh", "GBR": "Europe/London", "USA": "America/New_York",
+    "POL": "Europe/Warsaw", "LAT": "Europe/Riga", "LVA": "Europe/Riga",
+    "NZL": "Pacific/Auckland", "MEX": "America/Mexico_City", "ARG": "America/Argentina/Cordoba",
+    "TUR": "Europe/Istanbul", "BEL": "Europe/Brussels", "GER": "Europe/Berlin",
+    "DEU": "Europe/Berlin", "FRA": "Europe/Paris", "CZE": "Europe/Prague",
+    "HUN": "Europe/Budapest", "AUS": "Australia/Sydney",
+}
+WRC_TIMEZONES_BY_NAME = {r"Canarias|Canary": "Atlantic/Canary"}
+
+
+def _meta(node: dict) -> dict:
+    return {m.get("n"): m.get("v") for m in node.get("_meta", [])}
+
+
+def source_wrcdata(series: dict, ctx: Context) -> list[Round]:
+    """webappsdata.wrc.com: the WRC+ app's data store (seasons, rallies,
+    stages with first-car times in local time)."""
+    client = ctx.clients["wrcdata"]
+    category = series.get("category", "WRC")
+    seasons = ctx.store.get(
+        "wrcdata/seasons", client, f'{WRCDATA}/byType?t=%22Season%22&maxdepth=1',
+        json.loads, lambda d: [],
+    ) or []
+    overrides = {**WRC_TIMEZONES_BY_NAME, **(series.get("timezones") or {})}
+    rounds: list[Round] = []
+    for season in seasons:
+        m = _meta(season)
+        if m.get("category") != category or season.get("name") not in {str(y) for y in ctx.seasons}:
+            continue
+        detail = ctx.store.get(
+            f"wrcdata/season/{season['_id']}", client,
+            f'{WRCDATA}/byId?id=%22{season["_id"]}%22&maxdepth=2',
+            json.loads,
+            lambda d: [_meta(e).get("date-start", "") for e in d.get("_dchildren", [])],
+        ) or {}
+        for event in detail.get("_dchildren", []):
+            em = _meta(event)
+            name = em.get("name") or event.get("name", "")
+            tzname = next((tz for pat, tz in overrides.items() if re.search(pat, name, re.I)),
+                          WRC_TIMEZONES.get((em.get("info-flag") or "").upper()))
+            if tzname is None:
+                log(f"  warning: no time zone for {name} ({em.get('info-flag')}); "
+                    "stages shown as all-day (add it under `timezones`)")
+            rally = ctx.store.get(
+                f"wrcdata/rally/{event['_id']}", client,
+                f'{WRCDATA}/byId?id=%22{event["_id"]}%22&maxdepth=2',
+                json.loads,
+                lambda d: [(_meta(s).get("date") or "").replace("/", "-")
+                           for s in d.get("_dchildren", [])] or [_meta(d).get("date-start", "")],
+            ) or {}
+            rnd = Round(key=f"{season['name']}-{em.get('sas-eventid') or event['_id']}", name=name)
+            for stage in rally.get("_dchildren", []):
+                if stage.get("type") != "Session":
+                    continue
+                sm = _meta(stage)
+                day = (sm.get("date") or "").replace("/", "-")
+                try:
+                    d = date.fromisoformat(day)
+                except ValueError:
+                    continue
+                start: datetime | date = d
+                if tzname and re.fullmatch(r"\d{1,2}:\d{2}", sm.get("firstCar") or ""):
+                    hh, mm = (int(x) for x in sm["firstCar"].split(":"))
+                    start = datetime(d.year, d.month, d.day, hh, mm,
+                                     tzinfo=ZoneInfo(tzname)).astimezone(timezone.utc)
+                label = f"{stage.get('name', '')} {sm.get('location', '')}".strip()
+                rnd.sessions.append(Session(
+                    name=label, label=label, start=start, venue=em.get("info-based", ""),
+                    uid=f"wrcdata-{stage.get('_id')}@racecal",
+                ))
+            if not rnd.sessions and em.get("date-start"):
+                rnd.sessions.append(Session(
+                    name=name, label="Rally", start=date.fromisoformat(em["date-start"]),
+                    end_day=date.fromisoformat(em.get("date-finish") or em["date-start"]),
+                    venue=em.get("info-based", ""), uid=f"wrcdata-{event['_id']}@racecal",
+                ))
+            if rnd.sessions:
+                rounds.append(rnd)
+    return rounds
+
+
+def _dakar_route(body: bytes) -> list[dict]:
+    """dakar.com route table -> [{stage, date, route}]."""
+    page = body.decode("utf-8", errors="replace")
+    stages = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)]
+        if len(cells) < 3:
+            continue
+        m = re.search(r"([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", cells[1])
+        if not m:
+            continue
+        try:
+            day = date(int(m.group(3)), month_number(m.group(1)), int(m.group(2)))
+        except (KeyError, ValueError):
+            continue
+        label = cells[-1] if cells[-1] else f"Stage {cells[0]}"
+        stages.append({"stage": label, "date": day.isoformat(),
+                       "route": cells[2].replace("&gt;", ">").title()})
+    if not stages:
+        raise ValueError("no stages found on route page")
+    return stages
+
+
+def source_dakar(series: dict, ctx: Context) -> list[Round]:
+    """dakar.com/en/overall-route: the official route of the next edition,
+    one row per stage with its date. Updates when the organisers publish a
+    new route; past editions need a `fallback`."""
+    stages = ctx.store.get(
+        "dakar/route", ctx.clients["dakar"], "https://www.dakar.com/en/overall-route",
+        _dakar_route, lambda d: [s["date"] for s in d],
+    ) or []
+    if not stages:
+        return []
+    first = date.fromisoformat(stages[0]["date"])
+    # An edition is named after the January it runs in.
+    edition = first.year + (1 if first.month == 12 else 0)
+    if edition not in ctx.seasons:
+        return []
+    rnd = Round(key=str(edition), name=f"Dakar Rally {edition}")
+    for i, s in enumerate(stages):
+        rnd.sessions.append(Session(
+            name=f"{s['stage']} · {s['route']}", label=f"{s['stage']} {s['route']}",
+            start=date.fromisoformat(s["date"]),
+            venue=stages[0]["route"].split(" > ")[0] if i == 0 else "",
+            uid=f"dakar-{edition}-{i}@racecal",
+        ))
+    return [rnd]
+
+
 SOURCES = {
+    "dakar": source_dakar,
+    "dtm": source_dtm,
+    "wrcdata": source_wrcdata,
     "sportstimes": source_sportstimes,
     "fiawec": source_fiawec,
     "thesportsdb": source_thesportsdb,
@@ -877,6 +1094,9 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "fia": Client("fia.com", 1.0, deadline),
             "score": Client("score-raceinfo.com", 1.0, deadline),
             "koh": Client("kingofthehammers.com", 1.0, deadline),
+            "dtm": Client("api.dtm.com", 0.5, deadline),
+            "dakar": Client("dakar.com", 1.0, deadline),
+            "wrcdata": Client("webappsdata.wrc.com", 0.5, deadline),
         },
         seasons=[this_year + off for off in settings.get("seasons", [0, 1])],
     )
@@ -891,7 +1111,28 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
         if verbose:
             log(f"{series['name']} ({series['source']}):")
         before = len(events)
-        for rnd in source(series, ctx):
+        rounds = source(series, ctx)
+        fallback = series.get("fallback")
+        if fallback:
+            # Seasons the main source has nothing for come from the fallback.
+            covered = {r.key[:4] for r in rounds}
+            missing = [y for y in ctx.seasons if str(y) not in covered]
+            if missing and fallback.get("source") in SOURCES:
+                if verbose:
+                    log(f"  {', '.join(map(str, missing))} from {fallback['source']}")
+                sub = {**series, **fallback}
+                rounds += SOURCES[fallback["source"]](
+                    sub, Context(store=ctx.store, clients=ctx.clients, seasons=missing))
+        skips = series.get("skip") or []
+        for rnd in rounds:
+            if skips and rnd.sessions:
+                # Cancelled events sources still list: "<season> <event name>".
+                first = min(start_key(s.start) for s in rnd.sessions)
+                tag = f"{first.year} {rnd.name}"
+                if any(re.search(p, tag, re.I) for p in skips):
+                    if verbose:
+                        log(f"  skipped {tag}")
+                    continue
             rnd.sessions = [s for s in rnd.sessions if keep(s, series)]
             if not rnd.sessions:
                 continue
