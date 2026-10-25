@@ -3,25 +3,34 @@
 #
 # Racecal configuration
 #
-# Each [[series]] entry pulls one championship from TheSportsDB.
+# Each [[series]] block is one championship:
 #
-#   name     short label used as the event title prefix
-#   league   TheSportsDB league id
-#   group    true  = collapse every session of a round into ONE event
-#                    (start = first session, end = last session)
-#            false = one calendar event per session
-#   include  optional list of regexes; a session is kept only if its
-#            name matches at least one (case-insensitive)
-#   exclude  optional list of regexes; matching sessions are dropped
-#   duration default session length in minutes when the source has no
-#            end time (used for the last session of a grouped round too)
-#   long_sessions  { pattern, minutes } override for longer sessions
-#   group_by "season" groups a whole season instead of each round
-#   strip    regexes removed from session names to get the event name
-#            (grouped series only)
-#   title    fixed event title for grouped series; {season} is filled in
+#   name      short label used as the event title prefix
+#   source    where the schedule comes from:
+#               "sportstimes"  github.com/sportstimes/f1 data; needs `key`
+#                              (f1, indycar, f2, f3, fe, motogp, f1-academy)
+#               "fiawec"       the official FIA WEC website
+#               "thesportsdb"  TheSportsDB free API; needs `league` (id)
+#   group     true  = collapse every session of a round into ONE event
+#                     (start = first session, end = last session)
+#             false = one calendar event per session
+#   include   optional regexes matched against each session's label
+#             ("Practice 1", "Qualifying", "Race", ...); a session is kept
+#             only if one matches (case-insensitive)
+#   exclude   optional regexes; matching sessions are dropped
+#   duration  session length in minutes when nothing better is known
+#   durations optional [{ pattern, minutes }] overrides by session label
 #
-# Endurance races named "<N> Hours of ..." get N hours automatically.
+#   race_hours optional { "<regex on event name>" = hours } for races
+#             whose name doesn't say how long they are
+#
+# Races named "<N> Hours of ..." last N hours unless `durations` says
+# otherwise. TheSportsDB-only options:
+#   group_by  "season" groups a whole season instead of each round
+#   listing   "season" fetches a season in one request (only for series
+#             with fewer than 15 events a season)
+#   strip     regexes removed from session names to get the event name
+#   title     fixed event title for grouped series; {season} is filled in
 
 [settings]
 # Time zone used for the session list written into event descriptions.
@@ -29,53 +38,58 @@
 timezone = "UTC"
 # Seasons to fetch, relative to the current year (0 = this year).
 seasons = [0, 1]
-# Output file
 output = "public/racecal.ics"
 calendar_name = "Racecal"
-# Stop calling the API after this many minutes and build from stored rounds.
+# Stop making requests after this many minutes and build from stored data.
 time_budget_minutes = 20
 
 [[series]]
 name = "F1"
-league = 4370
+source = "sportstimes"
+key = "f1"
+name_suffix = " Grand Prix"
 group = false
-duration = 60
-# Race and sprint sessions run longer than practice.
-long_sessions = { pattern = "(Grand Prix|Sprint)$", minutes = 120 }
 
 [[series]]
 name = "IndyCar"
-league = 4373
+source = "sportstimes"
+key = "indycar"
 group = false
-duration = 60
-long_sessions = { pattern = "^(?!.*(Practice|Qualifying)).*$", minutes = 150 }
+durations = [{ pattern = "^Race$", minutes = 150 }]
 
 [[series]]
 name = "WEC"
-league = 4413
+source = "fiawec"
 group = false
-duration = 60
-exclude = ["Prologue"]
+durations = [
+  { pattern = "Practice", minutes = 90 },
+  { pattern = "Hyperpole", minutes = 10 },
+  { pattern = "Qualifying", minutes = 12 },
+]
+# Race lengths for events whose name doesn't say "<N> Hours".
+race_hours = { "Lone Star" = 6, "1812" = 10 }
 
 [[series]]
 name = "DTM"
+source = "thesportsdb"
 league = 4438
 group = false
 duration = 60
 
 [[series]]
 name = "WRC"
+source = "thesportsdb"
 league = 4409
 group = true
 duration = 30
-# Rally name is the session name with these patterns removed.
 strip = ["\\s+SS\\d+.*$", "^WRC\\s+"]
 
 [[series]]
 name = "Dakar"
+source = "thesportsdb"
 league = 4447
 group = true
-# Each stage is its own round in the source, so group the whole season.
 group_by = "season"
+listing = "season"   # one request per season (fewer than 15 stages)
 title = "Dakar Rally {season}"
 duration = 0

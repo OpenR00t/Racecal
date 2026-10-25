@@ -12,9 +12,9 @@ your own reminders and no app notifications.
 
 | Series | Source | Shown as |
 |---|---|---|
-| Formula 1 | TheSportsDB | one event per session |
-| IndyCar | TheSportsDB | one event per session |
-| WEC | TheSportsDB | one event per session (prologue excluded) |
+| Formula 1 | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
+| IndyCar | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
+| WEC | [fiawec.com](https://www.fiawec.com) (official site) | one event per session |
 | DTM | TheSportsDB | one event per session |
 | WRC | TheSportsDB | **one event per rally**, from the first stage to the last |
 | Dakar | TheSportsDB | **one event per edition**, all-day across the stage days |
@@ -47,14 +47,17 @@ within a day, so schedule changes do not appear instantly.
 ### Choosing series and sessions — `config.toml`
 
 Each `[[series]]` block is one championship. Remove a block to drop the
-series, or narrow it with regex filters on the session name:
+series, or narrow it with regex filters on the session label (the part
+after the event name, such as `Practice 1`, `Qualifying` or `Race`):
 
 ```toml
 [[series]]
 name = "F1"
-league = 4370
+source = "sportstimes"
+key = "f1"
+name_suffix = " Grand Prix"
 group = false
-include = ["Qualifying", "Grand Prix$", "Sprint$"]   # skip practice
+include = ["Qualifying", "Sprint", "Race"]   # skip practice
 ```
 
 Set `group = true` to collapse a round into a single event that starts at
@@ -69,10 +72,14 @@ session lists inside grouped events shown in that zone.
 Add an `[[event]]` block with `series`, `name`, `start` and `end` dates
 (inclusive). Add `start_time = "HH:MM"` (UTC) for a timed first day.
 
-### Finding a league id
+### Adding a series
 
-League ids come from [TheSportsDB](https://www.thesportsdb.com). Search
-for the series on the site; the number in the league page URL is the id.
+- **sportstimes** also has F2 (`f2`), F3 (`f3`), Formula E (`fe`), MotoGP
+  (`motogp`) and F1 Academy (`f1-academy`); set `key` to the folder name
+  under `_db/` in that repository.
+- **thesportsdb** covers many more championships; set `league` to the
+  number in the league's page URL on [TheSportsDB](https://www.thesportsdb.com).
+  Prefer another source where one exists (see below).
 
 ## Running locally
 
@@ -82,39 +89,47 @@ Requires Python 3.11 or newer and no extra packages.
 python racecal.py --verbose   # writes public/racecal.ics
 ```
 
-## How it stays within the API's rate limit
+## Requests and rate limits
 
-The free API allows only a limited number of requests, and GitHub's shared
-runners can hit that limit quickly. Racecal keeps every round it has
-fetched in `.cache/rounds.json` (restored between workflow runs with
-`actions/cache`) and only asks the API again when a stored round is stale:
+TheSportsDB's free API is shared by everyone using its public key and
+throttles hard (on GitHub's runners, about 10 requests before a two-minute
+pause), so it is only used for series with no better source. sportstimes
+data is one file per season, and the WEC site is a page per race.
 
-- finished rounds are never fetched again;
+Racecal keeps everything it fetches in `.cache/store.json` (restored
+between workflow runs with `actions/cache`) and only fetches it again when
+the stored copy is stale:
+
+- data for rounds that are over is never fetched again;
 - rounds starting within two weeks, or under way, are refreshed every 12
   hours;
-- rounds further out, and the empty rounds past a season's end, are
-  refreshed about weekly, spread over several days.
+- rounds further out are refreshed about weekly, spread over several days.
 
 A normal daily build makes a handful of requests. Rate-limit responses are
-retried with back-off (honouring `Retry-After`); a round that still fails
-uses its last stored copy, and after repeated refusals, or once
-`time_budget_minutes` is used up, the build finishes from stored data alone.
-Rounds missing from a bad run are fetched on the next one. If no series
+retried, honouring `Retry-After`, and after one the client slows down for
+the rest of the run. Anything that still fails uses its last stored copy;
+after repeated refusals, or once `time_budget_minutes` is used up, the build
+finishes from stored data. Gaps are filled on the next run. If no series
 produced any events, the build exits with an error so the published
 calendar is left as it was.
 
-The first build starts with an empty store, so it makes around 200 requests
-and may take several runs to fill in completely if the API pushes back.
+The first build starts with an empty store and takes about 15 minutes,
+almost all of it spent waiting on TheSportsDB.
 
 ## Notes and limits
 
-- Session data is only as current and complete as TheSportsDB. Future
-  seasons often start as date-only placeholders and gain session times
-  closer to the event.
-- A source timestamp of exactly midnight UTC is treated as "time unknown"
-  and becomes an all-day event.
-- Session end times are estimated (see `duration` and `long_sessions` in
-  `config.toml`); endurance races named "N Hours of …" use N hours.
+- Sessions are only as current as their source. Future seasons often
+  start as date-only placeholders and gain times closer to the event.
+- A timestamp of exactly midnight (local to the source) is treated as
+  "time not announced" and becomes an all-day event.
+- Session end times are estimated where the source has none (`duration`,
+  `durations` and `race_hours` in `config.toml`); endurance races named
+  "N Hours of …" use N hours.
+- The WEC season page doesn't link every race, so each race is also looked
+  up under the other season's year; a brand-new event with no counterpart
+  in the other year appears once the season page links it.
+- sportstimes publishes a season's file when the calendar is set, so next
+  year's F1 and IndyCar appear later than other series.
 
 ## License
 
@@ -123,5 +138,6 @@ Copyright (C) 2026 The Racecal contributors.
 Licensed under the GNU Affero General Public License v3.0 or later. See
 [LICENSE](LICENSE).
 
-Schedule data comes from [TheSportsDB](https://www.thesportsdb.com) and is
-subject to its terms.
+Schedule data comes from [sportstimes/f1](https://github.com/sportstimes/f1),
+[fiawec.com](https://www.fiawec.com) and [TheSportsDB](https://www.thesportsdb.com)
+and remains subject to their terms.
