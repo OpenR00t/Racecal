@@ -21,6 +21,7 @@ your own reminders and no app notifications.
 | W2RC (other rounds) | [fia.com](https://www.fia.com) championship calendar | one all-day event per rally |
 | SCORE Baja series | [score-raceinfo.com](https://score-raceinfo.com) | one all-day event per race week |
 | King of the Hammers | [kingofthehammers.com](https://kingofthehammers.com) schedule | one event per race, with start and end times |
+| ARA National Championship | [americanrallyassociation.org](https://www.americanrallyassociation.org) schedule page (next season from the announcement post until the page exists) | one all-day event per rally |
 
 All times are written in UTC; calendar apps convert them to your local
 time. Grouped events (WRC, Dakar) carry the full session list in their

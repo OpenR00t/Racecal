@@ -22,6 +22,9 @@
 #                              after /events/)
 #               "scoreraceinfo" SCORE desert races (score-raceinfo.com)
 #               "kingofthehammers" King of the Hammers race-week schedule
+#               "ara"          American Rally Association schedule pages (event
+#                              dates only); `levels` = any of "National",
+#                              "Super Regional", "Regional" (default National)
 #   group     true  = collapse every session of a round into ONE event
 #                     (start = first session, end = last session)
 #             false = one calendar event per session
@@ -127,3 +130,9 @@ group = false
 # the youth race.
 exclude = ["Gates", "Registration", "Check-In", "Meeting", "Awards",
            "Prerunning", "POWER HOUR", "Kids"]
+
+[[series]]
+name = "ARA"
+source = "ara"
+group = false
+levels = ["National"]

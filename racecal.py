@@ -7,6 +7,7 @@ Sources:
   sportstimes  open schedule data on GitHub (F1, IndyCar, ...)
   fiawec       the official FIA WEC website's structured race data
   thesportsdb  TheSportsDB free API (WRC, DTM, Dakar)
+  ara          americanrallyassociation.org schedule pages
   events.toml  hand-maintained events with no data feed
 
 Uses only the Python standard library (3.11+).
@@ -26,6 +27,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from html import unescape as html_unescape
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -684,6 +686,143 @@ def source_kingofthehammers(series: dict, ctx: Context) -> list[Round]:
     return list(rounds.values())
 
 
+ARA_SITE = "https://www.americanrallyassociation.org"
+ARA_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+ARA_DATES = re.compile(
+    rf"^({ARA_MONTH})\s+(\d{{1,2}})(?:\s*[-–]\s*(?:({ARA_MONTH})\s+)?(\d{{1,2}}))?\s*,\s*(\d{{4}})$"
+)
+ARA_POST_LINE = re.compile(
+    rf"^({ARA_MONTH})\s+(\d{{1,2}})(?:\s*[-–]\s*(?:({ARA_MONTH})\s+)?(\d{{1,2}}))?\s*[–-]\s*(.+)$"
+)
+
+
+def _ara_lines(body: bytes) -> list[str]:
+    """Wix page -> text lines (block tags become line breaks, inline tags
+    are dropped so words split across spans stay whole)."""
+    text = body.decode("utf-8", errors="replace")
+    text = re.sub(r"<(script|style)\b.*?</\1>", "", text, flags=re.S | re.I)
+    text = re.sub(r"<(br|/p|/h\d|/li|/div)\b[^>]*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html_unescape(text).replace("​", "").replace("\xa0", " ")
+    return [re.sub(r"\s+", " ", line).strip() for line in text.split("\n") if line.strip()]
+
+
+def _ara_span(m1: str, d1: str, m2: str | None, d2: str | None, year: int) -> tuple[date, date]:
+    start = date(year, month_number(m1), int(d1))
+    end_month = month_number(m2) if m2 else start.month
+    end = date(year + (end_month < start.month), end_month, int(d2 or d1))
+    return start, end
+
+
+def _ara_schedule(body: bytes) -> list[dict]:
+    """<year>-ara-schedule page -> [{level, name, start, end, venue}].
+
+    The page has a National Championship section, then Super Regional and
+    Regional events; each entry is a name, a "(category)" line, a date line
+    ("March 13-14, 2026") and a location line.
+    """
+    lines = _ara_lines(body)
+    level, items = "", []
+    for i, line in enumerate(lines):
+        if re.search(r"National Championship$", line):
+            level = "National"
+            continue
+        if re.search(r"Super Regional", line) and len(line) < 60:
+            level = "Super Regional"
+            continue
+        if re.search(r"Regional Events$", line):
+            level = "Regional"
+            continue
+        m = ARA_DATES.match(line)
+        if not (m and level and i >= 1):
+            continue
+        m1, d1, m2, d2, year = m.groups()
+        start, end = _ara_span(m1, d1, m2, d2, int(year))
+        j = i - 1
+        if re.fullmatch(r"\(.*\)", lines[j]) and j >= 1:
+            j -= 1
+        name = re.sub(r"\s*\([^)]*\)$", "", lines[j]).strip()
+        venue = lines[i + 1] if i + 1 < len(lines) and not ARA_DATES.match(lines[i + 1]) else ""
+        items.append({"level": level, "name": name, "start": start.isoformat(),
+                      "end": end.isoformat(), "venue": venue})
+    if not items:
+        raise ValueError("no events found on schedule page")
+    return items
+
+
+def _ara_feed(body: bytes) -> list[dict]:
+    """blog-feed.xml -> [{title, link}]."""
+    page = body.decode("utf-8", errors="replace")
+    posts = []
+    for item in re.findall(r"<item>(.*?)</item>", page, re.S):
+        title = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", item, re.S)
+        link = re.search(r"<link>(.*?)</link>", item, re.S)
+        if title and link:
+            posts.append({"title": title.group(1).strip(), "link": link.group(1).strip()})
+    return posts
+
+
+def _ara_post(body: bytes, year: int) -> list[dict]:
+    """Schedule announcement post -> the "<year> ... National Calendar" list
+    of "February 5-6 – Sno*Drift Rally" lines."""
+    lines = _ara_lines(body)
+    items, inside = [], False
+    for line in lines:
+        if re.search(rf"\b{year}\b.*National Calendar", line, re.I):
+            inside = True
+            continue
+        if not inside:
+            continue
+        m = ARA_POST_LINE.match(line)
+        if not m:
+            if items:
+                break
+            continue
+        m1, d1, m2, d2, name = m.groups()
+        start, end = _ara_span(m1, d1, m2, d2, year)
+        items.append({"level": "National", "name": name.strip(), "start": start.isoformat(),
+                      "end": end.isoformat(), "venue": ""})
+    return items
+
+
+def source_ara(series: dict, ctx: Context) -> list[Round]:
+    """americanrallyassociation.org: the <year>-ara-schedule page; for a
+    season without one yet, the national calendar in the news post that
+    announced it. Event dates only. `levels` picks National, Super
+    Regional and/or Regional events (default National)."""
+    client = ctx.clients["ara"]
+    levels = set(series.get("levels", ["National"]))
+    rounds: list[Round] = []
+    for season in ctx.seasons:
+        items = ctx.store.get(
+            f"ara/schedule/{season}", client, f"{ARA_SITE}/{season}-ara-schedule",
+            _ara_schedule, lambda d: [i["start"] for i in d],
+        )
+        if items is None:
+            posts = ctx.store.get(
+                "ara/feed", client, f"{ARA_SITE}/blog-feed.xml", _ara_feed, lambda d: [],
+            ) or []
+            post = next((p for p in posts
+                         if re.search(rf"\b{season}\b.*(schedule|calendar)", p["title"], re.I)), None)
+            if post:
+                items = ctx.store.get(
+                    f"ara/post/{season}", client, post["link"],
+                    lambda b, y=season: _ara_post(b, y), lambda d: [i["start"] for i in d],
+                )
+        for item in items or []:
+            if item["level"] not in levels:
+                continue
+            start, end = date.fromisoformat(item["start"]), date.fromisoformat(item["end"])
+            slug = re.sub(r"[^a-z0-9]+", "-", item["name"].lower()).strip("-")
+            rnd = Round(key=f"{season}-{slug}", name=item["name"])
+            rnd.sessions.append(Session(
+                name=item["name"], label=item["name"], start=start, end_day=end,
+                venue=item["venue"], uid=f"ara-{season}-{slug}@racecal",
+            ))
+            rounds.append(rnd)
+    return rounds
+
+
 DTM_API = "https://api.dtm.com/data"
 DTM_LABEL_FIXES = {"qualiyfing": "qualifying"}
 
@@ -904,6 +1043,7 @@ SOURCES = {
     "fia": source_fia,
     "scoreraceinfo": source_scoreraceinfo,
     "kingofthehammers": source_kingofthehammers,
+    "ara": source_ara,
 }
 
 
@@ -1126,6 +1266,7 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "fia": Client("fia.com", 1.0, deadline),
             "score": Client("score-raceinfo.com", 1.0, deadline),
             "koh": Client("kingofthehammers.com", 1.0, deadline),
+            "ara": Client("americanrallyassociation.org", 1.0, deadline),
             "dtm": Client("api.dtm.com", 0.5, deadline),
             "dakar": Client("dakar.com", 1.0, deadline),
             "wrcdata": Client("webappsdata.wrc.com", 0.5, deadline),
