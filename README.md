@@ -15,6 +15,7 @@ your own reminders and no app notifications.
 | Formula 1 | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
 | IndyCar | [sportstimes/f1](https://github.com/sportstimes/f1) | one event per session |
 | WEC | [fiawec.com](https://www.fiawec.com) (official site) | one event per session |
+| IMSA WeatherTech | [TheSportsDB](https://www.thesportsdb.com) (imsa.com blocks automated requests) | one event per race (race start times only; the Roar test is left out) |
 | DTM | dtm.com's own API | one event per session, with real end times |
 | WRC | the WRC+ app's data (next season from TheSportsDB until it's loaded) | **one event per rally**, from the first stage to the last |
 | Dakar | [dakar.com](https://www.dakar.com/en/overall-route) official route (past editions from TheSportsDB) | **one event per edition**, all-day across the stage days |

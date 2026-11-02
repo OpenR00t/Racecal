@@ -88,6 +88,28 @@ durations = [
 race_hours = { "Lone Star" = 6, "1812" = 10 }
 
 [[series]]
+name = "IMSA"
+source = "thesportsdb"
+# IMSA WeatherTech SportsCar Championship. imsa.com is behind a bot check,
+# so TheSportsDB is the only workable source: race start times only.
+league = 4488
+listing = "season"
+group = false
+# The Roar is a pre-season test, not a race.
+exclude = ["^Roar\\b"]
+# Session labels here are the event names, so race lengths go by name.
+duration = 160
+durations = [
+  { pattern = "Rolex 24", minutes = 1440 },
+  { pattern = "Twelve Hours", minutes = 720 },
+  { pattern = "Six Hours", minutes = 360 },
+  { pattern = "Petit Le Mans", minutes = 600 },
+  { pattern = "Endurance Grand Prix", minutes = 360 },
+  { pattern = "Battle On The Bricks", minutes = 360 },
+  { pattern = "Long Beach|Detroit", minutes = 100 },
+]
+
+[[series]]
 name = "DTM"
 source = "dtm"
 group = false
