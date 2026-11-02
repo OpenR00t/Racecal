@@ -823,6 +823,114 @@ def source_ara(series: dict, ctx: Context) -> list[Round]:
     return rounds
 
 
+def _ical_events(body: bytes) -> list[dict]:
+    """An iCalendar feed -> [{uid, summary, location, start, end, all_day}].
+
+    Timed events come back in UTC (ISO strings); all-day events as dates with
+    the end day inclusive.
+    """
+    text = body.decode("utf-8", "replace").replace("\r\n", "\n")
+    text = re.sub(r"\n[ \t]", "", text)  # unfold continuation lines
+    events = []
+    for block in re.findall(r"BEGIN:VEVENT\n(.*?)\nEND:VEVENT", text, re.S):
+        props: dict[str, tuple[str, str]] = {}
+        for line in block.split("\n"):
+            name, sep, value = line.partition(":")
+            if not sep:
+                continue
+            key, _, params = name.partition(";")
+            props.setdefault(key.upper(), (params, value))
+
+        def when(key: str):
+            params, value = props.get(key, ("", ""))
+            if not value:
+                return None, False
+            if "VALUE=DATE" in params.upper() or re.fullmatch(r"\d{8}", value):
+                return datetime.strptime(value[:8], "%Y%m%d").date(), True
+            tz = re.search(r"TZID=([^;:]+)", params)
+            if value.endswith("Z"):
+                moment = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            else:
+                moment = datetime.strptime(value[:15], "%Y%m%dT%H%M%S").replace(
+                    tzinfo=ZoneInfo(tz.group(1)) if tz else timezone.utc)
+            return moment.astimezone(timezone.utc), False
+
+        start, all_day = when("DTSTART")
+        if start is None:
+            continue
+        end, _ = when("DTEND")
+        if all_day:
+            # DTEND of an all-day event is exclusive.
+            end = (end - timedelta(days=1)) if end else start
+        unescape = lambda v: re.sub(r"\\([,;\\])", r"\1", v).replace("\\n", " ").strip()
+        events.append({
+            "uid": props.get("UID", ("", ""))[1].strip(),
+            "summary": unescape(props.get("SUMMARY", ("", ""))[1]),
+            "location": unescape(props.get("LOCATION", ("", ""))[1]),
+            "start": start.isoformat(),
+            "end": (end or start).isoformat(),
+            "all_day": all_day,
+        })
+    return events
+
+
+def source_ical(series: dict, ctx: Context) -> list[Round]:
+    """An official iCalendar feed (`url`), filtered by `match` (a regex on
+    the event title). Feeds like this usually drop events once they're
+    over, so each matching event is also kept in the store and stays in the
+    calendar afterwards; a stored event still in the future that leaves the
+    feed is dropped (cancelled). `strip` cleans titles, `venue` replaces
+    a missing or generic location, `location_strip` trims it."""
+    client = ctx.clients["ical"]
+    url = series["url"]
+    feed_key = "ical/" + re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[-80:]
+    feed = ctx.store.get(feed_key, client, url, _ical_events,
+                         lambda d: [e["start"] for e in d])
+    match = re.compile(series.get("match", "."), re.I)
+    prefix = f"ical-event/{series['name']}/"
+    today = datetime.now(timezone.utc).date()
+    if feed is not None:
+        current = {e["uid"] for e in feed if match.search(e["summary"])}
+        for e in feed:
+            if e["uid"] and e["uid"] in current:
+                ctx.store._put(prefix + e["uid"], e, [e["end"][:10]])
+        for key in [k for k in ctx.store.entries if k.startswith(prefix)]:
+            e = ctx.store.entries[key]["data"]
+            if e and e["uid"] not in current and date.fromisoformat(e["end"][:10]) >= today:
+                del ctx.store.entries[key]  # removed from the feed before it happened
+    strip = series.get("strip") or []
+    if isinstance(strip, str):
+        strip = [strip]
+    seasons = set(ctx.seasons)
+    rounds: list[Round] = []
+    for key, entry in ctx.store.entries.items():
+        e = entry.get("data") if key.startswith(prefix) else None
+        if not e:
+            continue
+        name = e["summary"]
+        for p in strip:
+            name = re.sub(p, "", name, flags=re.I).strip()
+        name = name or e["summary"]
+        venue = e["location"]
+        for p in series.get("location_strip") or []:
+            venue = re.sub(p, "", venue, flags=re.I).strip()
+        venue = venue or series.get("venue", "")
+        if e["all_day"]:
+            start, last = date.fromisoformat(e["start"]), date.fromisoformat(e["end"])
+            session = Session(name=name, label=name, start=start, end_day=last,
+                              venue=venue, uid=f"ical-{e['uid']}")
+        else:
+            start = datetime.fromisoformat(e["start"])
+            minutes = int((datetime.fromisoformat(e["end"]) - start).total_seconds() // 60)
+            session = Session(name=name, label=name, start=start, minutes=max(minutes, 0),
+                              venue=venue, uid=f"ical-{e['uid']}")
+        if start_key(session.start).year not in seasons:
+            continue
+        rounds.append(Round(key=f"{start_key(session.start):%Y}-{e['uid']}", name=name,
+                            sessions=[session]))
+    return rounds
+
+
 DTM_API = "https://api.dtm.com/data"
 DTM_LABEL_FIXES = {"qualiyfing": "qualifying"}
 
@@ -1044,6 +1152,7 @@ SOURCES = {
     "scoreraceinfo": source_scoreraceinfo,
     "kingofthehammers": source_kingofthehammers,
     "ara": source_ara,
+    "ical": source_ical,
 }
 
 
@@ -1267,6 +1376,7 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "score": Client("score-raceinfo.com", 1.0, deadline),
             "koh": Client("kingofthehammers.com", 1.0, deadline),
             "ara": Client("americanrallyassociation.org", 1.0, deadline),
+            "ical": Client("calendar feeds", 1.0, deadline),
             "dtm": Client("api.dtm.com", 0.5, deadline),
             "dakar": Client("dakar.com", 1.0, deadline),
             "wrcdata": Client("webappsdata.wrc.com", 0.5, deadline),

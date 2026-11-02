@@ -22,6 +22,11 @@
 #                              after /events/)
 #               "scoreraceinfo" SCORE desert races (score-raceinfo.com)
 #               "kingofthehammers" King of the Hammers race-week schedule
+#               "ical"         an official iCalendar feed: `url`, `match` (regex
+#                              on the event title), optional `strip`, `venue`
+#                              (used when the feed gives no location) and
+#                              `location_strip`; past events are kept even
+#                              after the feed drops them
 #               "ara"          American Rally Association schedule pages (event
 #                              dates only); `levels` = any of "National",
 #                              "Super Regional", "Regional" (default National)
@@ -108,6 +113,30 @@ durations = [
   { pattern = "Battle On The Bricks", minutes = 360 },
   { pattern = "Long Beach|Detroit", minutes = 100 },
 ]
+
+[[series]]
+name = "24h Nürburgring"
+source = "ical"
+# The Nürburgring's own motorsport calendar (published through calovo.de,
+# linked from nuerburgring.de/events). 24h-rennen.de blocks automated
+# requests. Event dates only; the feed lists upcoming events.
+url = "https://i.cal.to/ical/7883/nuerburgring/nuerburgring-motorsport/12345.12345-54321.ics"
+match = "24h Nürburgring"
+strip = ["^ADAC\\s+", "RAVENOL\\s+", "\\s*&\\s*DHLM$"]
+location_strip = ["^calovo\\.de\\s*\\|?\\s*"]
+venue = "Nürburgring"
+group = false
+
+[[series]]
+name = "NLS"
+source = "ical"
+# Nürburgring Langstrecken-Serie, from the same feed.
+url = "https://i.cal.to/ical/7883/nuerburgring/nuerburgring-motorsport/12345.12345-54321.ics"
+match = "Langstrecken-Serie"
+strip = ["^ADAC\\s+", "RAVENOL\\s+"]
+location_strip = ["^calovo\\.de\\s*\\|?\\s*"]
+venue = "Nürburgring"
+group = false
 
 [[series]]
 name = "DTM"
