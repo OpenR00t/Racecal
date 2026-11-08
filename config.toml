@@ -30,6 +30,8 @@
 #               "ara"          American Rally Association schedule pages (event
 #                              dates only); `levels` = any of "National",
 #                              "Super Regional", "Regional" (default National)
+#               "nascar"       NASCAR's schedule feed (cf.nascar.com); `series_id`
+#                              1 = Cup, 2 = O'Reilly Auto Parts, 3 = Truck
 #   group     true  = collapse every session of a round into ONE event
 #                     (start = first session, end = last session)
 #             false = one calendar event per session
@@ -187,3 +189,26 @@ name = "ARA"
 source = "ara"
 group = false
 levels = ["National"]
+
+[[series]]
+name = "NASCAR Cup"
+source = "nascar"
+series_id = 1
+group = false
+# The feed gives start times only.
+durations = [
+  { pattern = "Practice", minutes = 50 },
+  { pattern = "Qualifying", minutes = 60 },
+  { pattern = "^Race$", minutes = 195 },
+]
+
+[[series]]
+name = "NASCAR O'Reilly"
+source = "nascar"
+series_id = 2
+group = false
+durations = [
+  { pattern = "Practice", minutes = 50 },
+  { pattern = "Qualifying", minutes = 60 },
+  { pattern = "^Race$", minutes = 150 },
+]

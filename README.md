@@ -25,6 +25,7 @@ your own reminders and no app notifications.
 | SCORE Baja series | [score-raceinfo.com](https://score-raceinfo.com) | one all-day event per race week |
 | King of the Hammers | [kingofthehammers.com](https://kingofthehammers.com) schedule | one event per race, with start and end times |
 | ARA National Championship | [americanrallyassociation.org](https://www.americanrallyassociation.org) schedule page (next season from the announcement post until the page exists) | one all-day event per rally |
+| NASCAR Cup and O'Reilly Auto Parts Series | NASCAR's own schedule feed (the data behind [nascar.com](https://www.nascar.com)'s schedule) | one event per session (practice, qualifying, race) |
 
 All times are written in UTC; calendar apps convert them to your local
 time. Grouped events (WRC, Dakar) carry the full session list in their

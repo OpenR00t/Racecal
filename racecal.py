@@ -8,6 +8,7 @@ Sources:
   fiawec       the official FIA WEC website's structured race data
   thesportsdb  TheSportsDB free API (WRC, DTM, Dakar)
   ara          americanrallyassociation.org schedule pages
+  nascar       NASCAR's own schedule feed (Cup, O'Reilly, Truck)
   events.toml  hand-maintained events with no data feed
 
 Uses only the Python standard library (3.11+).
@@ -144,8 +145,9 @@ class FetchError(Exception):
 class Client:
     """Polite HTTP client for one host: spacing, retries, Retry-After."""
 
-    def __init__(self, name: str, gap: float, deadline: float):
+    def __init__(self, name: str, gap: float, deadline: float, missing: tuple[int, ...] = (404,)):
         self.name = name
+        self.missing = missing  # status codes meaning "doesn't exist (yet)"
         self.gap = gap
         self.deadline = deadline
         self.blocked = False
@@ -176,7 +178,7 @@ class Client:
                 self._failures = 0
                 return body
             except urllib.error.HTTPError as err:
-                if err.code == 404:
+                if err.code in self.missing:
                     raise FetchError("HTTP 404") from err
                 if err.code not in (429, 500, 502, 503, 504):
                     raise FetchError(f"HTTP {err.code}") from err
@@ -1141,6 +1143,54 @@ def source_dakar(series: dict, ctx: Context) -> list[Round]:
     return [rnd]
 
 
+NASCAR = "https://cf.nascar.com/cacher"
+NASCAR_RUN = {1: "Practice", 2: "Qualifying", 3: "Race"}
+
+
+def _nascar_label(name: str, run_type: int) -> str:
+    """Session label: the feed's name without notes like "(Impound)"."""
+    label = re.sub(r"\s*\([^)]*\)", "", name).strip()
+    return label or NASCAR_RUN.get(run_type, "Session")
+
+
+def source_nascar(series: dict, ctx: Context) -> list[Round]:
+    """NASCAR's own schedule feed (the data behind nascar.com's schedule).
+
+    One file per season covers all three national series; `series_id` picks
+    one (1 Cup, 2 O'Reilly Auto Parts, 3 Truck). Each race lists its weekend
+    schedule in UTC; on-track sessions are practice, qualifying and the race.
+    """
+    sid = str(series.get("series_id", 1))
+    client = ctx.clients["nascar"]
+    rounds: list[Round] = []
+    for season in ctx.seasons:
+        data = ctx.store.get(
+            f"nascar/{season}", client, f"{NASCAR}/{season}/race_list_basic.json",
+            json.loads,
+            lambda d: [r.get("date_scheduled", "")[:10] for v in d.values() for r in v],
+        )
+        if not data:
+            continue
+        for race in data.get(f"series_{sid}", []):
+            name = race.get("race_name", "").strip()
+            rnd = Round(key=f"{season}-{race['race_id']}", name=name)
+            for i, item in enumerate(race.get("schedule") or []):
+                run = item.get("run_type") or 0
+                if run not in NASCAR_RUN or not item.get("start_time_utc"):
+                    continue
+                start = datetime.fromisoformat(item["start_time_utc"]).replace(tzinfo=timezone.utc)
+                label = _nascar_label(item.get("event_name", ""), run)
+                rnd.sessions.append(Session(
+                    name=f"{name} · {label}", label=label, start=start,
+                    venue=race.get("track_name", ""),
+                    uid=f"nascar-{sid}-{race['race_id']}-{i}@racecal",
+                ))
+            if rnd.sessions:
+                rnd.sessions.sort(key=lambda s: start_key(s.start))
+                rounds.append(rnd)
+    return rounds
+
+
 SOURCES = {
     "dakar": source_dakar,
     "dtm": source_dtm,
@@ -1153,6 +1203,7 @@ SOURCES = {
     "kingofthehammers": source_kingofthehammers,
     "ara": source_ara,
     "ical": source_ical,
+    "nascar": source_nascar,
 }
 
 
@@ -1380,6 +1431,7 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "dtm": Client("api.dtm.com", 0.5, deadline),
             "dakar": Client("dakar.com", 1.0, deadline),
             "wrcdata": Client("webappsdata.wrc.com", 0.5, deadline),
+            "nascar": Client("cf.nascar.com", 0.5, deadline, missing=(403, 404)),  # 403 = season not published
         },
         seasons=[this_year + off for off in settings.get("seasons", [0, 1])],
     )
