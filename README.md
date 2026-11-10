@@ -26,6 +26,7 @@ your own reminders and no app notifications.
 | King of the Hammers | [kingofthehammers.com](https://kingofthehammers.com) schedule | one event per race, with start and end times |
 | ARA National Championship | [americanrallyassociation.org](https://www.americanrallyassociation.org) schedule page (next season from the announcement post until the page exists) | one all-day event per rally |
 | NASCAR Cup and O'Reilly Auto Parts Series | NASCAR's own schedule feed (the data behind [nascar.com](https://www.nascar.com)'s schedule) | one event per session (practice, qualifying, race) |
+| MotoGP | MotoGP's own calendar API (the data behind [motogp.com](https://www.motogp.com)'s calendar) | one event per session (practice, qualifying, sprint, warm up, race); next season as one all-day event per weekend until the timetable is out |
 
 All times are written in UTC; calendar apps convert them to your local
 time. Grouped events (WRC, Dakar) carry the full session list in their

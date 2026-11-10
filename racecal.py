@@ -9,6 +9,7 @@ Sources:
   thesportsdb  TheSportsDB free API (WRC, DTM, Dakar)
   ara          americanrallyassociation.org schedule pages
   nascar       NASCAR's own schedule feed (Cup, O'Reilly, Truck)
+  motogp       MotoGP's own calendar API (MotoGP, Moto2, Moto3)
   events.toml  hand-maintained events with no data feed
 
 Uses only the Python standard library (3.11+).
@@ -1191,6 +1192,106 @@ def source_nascar(series: dict, ctx: Context) -> list[Round]:
     return rounds
 
 
+MOTOGP = "https://api.motogp.pulselive.com/motogp/v1"
+MOTOGP_LABELS = {
+    "FP1": "Practice 1", "FP2": "Practice 2", "PR": "Practice",
+    "Q1": "Qualifying 1", "Q2": "Qualifying 2", "SPR": "Sprint",
+    "WUP": "Warm Up", "RAC": "Race", "RAC2": "Race",
+}
+SMALL_WORDS = {"of", "the", "and", "de", "del", "da", "do"}
+
+
+def _motogp_name(raw: str) -> str:
+    """'PT GRAND PRIX OF THAILAND ' -> 'Grand Prix of Thailand' (no sponsor)."""
+    m = re.search(r"GRAND PRIX\b.*", raw.strip(), re.I)
+    words = (m.group(0) if m else raw).split()
+    return " ".join(
+        w.lower() if i and w.lower() in SMALL_WORDS else w[:1].upper() + w[1:].lower()
+        for i, w in enumerate(words)
+    )
+
+
+def _motogp_events(body: bytes) -> list[dict]:
+    """Only the Grand Prix weekends and their on-track sessions, compacted."""
+    out = []
+    for ev in json.loads(body):
+        if ev.get("kind") != "GP":
+            continue  # tests, team launches and other media events
+        out.append({
+            "id": ev["id"],
+            "name": ev.get("name", ""),
+            "status": ev.get("status", ""),
+            "start": ev.get("date_start", ""),
+            "end": ev.get("date_end", ""),
+            "circuit": (ev.get("circuit") or {}).get("name", ""),
+            "sessions": [
+                {
+                    "class": (b.get("category") or {}).get("name", ""),
+                    "short": b.get("shortname", ""),
+                    "start": b.get("date_start", ""),
+                    "end": b.get("date_end", ""),
+                }
+                for b in ev.get("broadcasts") or []
+                if b.get("type") == "SESSION"
+            ],
+        })
+    return out
+
+
+def _motogp_time(stamp: str) -> datetime | None:
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S%z").astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def source_motogp(series: dict, ctx: Context) -> list[Round]:
+    """MotoGP's own API (the data behind motogp.com's calendar).
+
+    One request per season covers every class; `class` picks one
+    ("MotoGP", "Moto2", "Moto3"). Session times appear a few weeks before
+    the season; until then each Grand Prix is an all-day weekend event.
+    """
+    cls = series.get("class", "MotoGP")
+    client = ctx.clients["motogp"]
+    rounds: list[Round] = []
+    for season in ctx.seasons:
+        data = ctx.store.get(
+            f"motogp/{season}", client, f"{MOTOGP}/events?seasonYear={season}",
+            _motogp_events, lambda d: [e["start"][:10] for e in d],
+        )
+        for ev in data or []:
+            if "CANCEL" in ev["status"].upper():
+                continue
+            name = _motogp_name(ev["name"])
+            rnd = Round(key=f"{season}-{ev['id']}", name=name)
+            seen: set[str] = set()
+            for item in ev["sessions"]:
+                label = MOTOGP_LABELS.get(item["short"])
+                start = _motogp_time(item["start"])
+                if item["class"] != cls or not label or start is None or label in seen:
+                    continue
+                seen.add(label)
+                end = _motogp_time(item["end"])
+                minutes = int((end - start).total_seconds() // 60) if end and end > start else 0
+                slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+                rnd.sessions.append(Session(
+                    name=f"{name} · {label}", label=label, start=start, minutes=minutes,
+                    venue=ev["circuit"],
+                    uid=f"motogp-{cls.lower()}-{season}-{ev['id']}-{slug}@racecal",
+                ))
+            if not rnd.sessions and ev["start"]:
+                # Timetable not published yet: the weekend as one all-day event.
+                rnd.sessions.append(Session(
+                    name=name, label=name, start=date.fromisoformat(ev["start"][:10]),
+                    end_day=date.fromisoformat((ev["end"] or ev["start"])[:10]),
+                    venue=ev["circuit"],
+                    uid=f"motogp-{cls.lower()}-{season}-{ev['id']}@racecal",
+                ))
+            rounds.append(rnd)
+    return rounds
+
+
 SOURCES = {
     "dakar": source_dakar,
     "dtm": source_dtm,
@@ -1204,6 +1305,7 @@ SOURCES = {
     "ara": source_ara,
     "ical": source_ical,
     "nascar": source_nascar,
+    "motogp": source_motogp,
 }
 
 
@@ -1432,6 +1534,7 @@ def build(root: Path, store: Store, verbose: bool) -> tuple[list[Event], dict[st
             "dakar": Client("dakar.com", 1.0, deadline),
             "wrcdata": Client("webappsdata.wrc.com", 0.5, deadline),
             "nascar": Client("cf.nascar.com", 0.5, deadline, missing=(403, 404)),  # 403 = season not published
+            "motogp": Client("api.motogp.pulselive.com", 0.5, deadline),
         },
         seasons=[this_year + off for off in settings.get("seasons", [0, 1])],
     )

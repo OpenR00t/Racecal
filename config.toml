@@ -32,6 +32,8 @@
 #                              "Super Regional", "Regional" (default National)
 #               "nascar"       NASCAR's schedule feed (cf.nascar.com); `series_id`
 #                              1 = Cup, 2 = O'Reilly Auto Parts, 3 = Truck
+#               "motogp"       MotoGP's own calendar API (api.motogp.pulselive.com);
+#                              `class` = "MotoGP" (default), "Moto2" or "Moto3"
 #   group     true  = collapse every session of a round into ONE event
 #                     (start = first session, end = last session)
 #             false = one calendar event per session
@@ -211,4 +213,16 @@ durations = [
   { pattern = "Practice", minutes = 50 },
   { pattern = "Qualifying", minutes = 60 },
   { pattern = "^Race$", minutes = 150 },
+]
+
+[[series]]
+name = "MotoGP"
+source = "motogp"
+class = "MotoGP"
+group = false
+# Practice, qualifying and warm-up come with real end times; the races
+# are listed by start time only.
+durations = [
+  { pattern = "^Sprint$", minutes = 30 },
+  { pattern = "^Race$", minutes = 50 },
 ]
